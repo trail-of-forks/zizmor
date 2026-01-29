@@ -11,14 +11,16 @@ testcase:
   ]
 
 queries:
+  # In pretty mode, returns the mapping pair (key: value)
   - query: [flow1, foo]
-    expected: "{ foo: [1, 2, 3: [4, 5, { a: b }]] }"
+    expected: "foo: [1, 2, 3: [4, 5, { a: b }]]"
 
+  # Array index 2 is a single-entry mapping embedded in the sequence
   - query: [flow1, foo, 2]
-    # TODO: ideally would be `3: [4, 5, { a: b }]`
-    expected: "[4, 5, { a: b }]"
+    expected: "3: [4, 5, { a: b }]"
 
-  - query: [flow1, foo, 2, 2]
+  # Must navigate through the embedded mapping using the key "3"
+  - query: [flow1, foo, 2, "3", 2]
     expected: "{ a: b }"
 
   - query: [flow2, foo, 1]
@@ -28,7 +30,7 @@ queries:
     expected: "{ a: }"
 
   - query: [flow4, foo]
-    expected: "{\n    foo: [1, 2, 3: [4, 5, { a: b }]],\n  }"
+    expected: "    foo: [1, 2, 3: [4, 5, { a: b }]]"
 
   - query: [flow5, 0]
     expected: "    abc"

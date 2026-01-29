@@ -193,12 +193,25 @@ impl From<Node<'_>> for Location {
     }
 }
 
+impl Location {
+    /// Create a Location from a SpanInfo and LineIndex.
+    fn from_span(span: &SpanInfo, _line_index: &LineIndex) -> Self {
+        Self {
+            byte_span: (span.byte_range.start, span.byte_range.end),
+            point_span: (
+                (span.point_range.start.row, span.point_range.start.column),
+                (span.point_range.end.row, span.point_range.end.column),
+            ),
+        }
+    }
+}
+
 /// Unique identifier for a CST node. Provides O(1) parent access without lifetime issues.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 struct NodeId(usize);
 
 /// Storage for all CST nodes. Single source of truth for the entire tree.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 struct CstStore {
     /// All nodes stored in a contiguous Vec for cache-friendly access.
     nodes: Vec<YamlNodeData>,
@@ -207,38 +220,37 @@ struct CstStore {
 }
 
 /// A node in the CST with parent tracking via NodeId.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 struct YamlNodeData {
-    /// Unique identifier for this node.
-    id: NodeId,
     /// Parent node ID (None only for root).
     parent_id: Option<NodeId>,
     /// The node's type and data.
     kind: YamlNodeKind,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 enum YamlNodeKind {
     Mapping(MappingData),
     Sequence(SequenceData),
     Scalar(ScalarData),
+    /// An alias node that references an anchor's content.
+    Alias(AliasData),
 }
 
 /// A mapping node (object/dict) in the reduced CST.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 struct MappingData {
     /// Map from key string to entry (key location + optional value node).
-    /// Uses Cow for zero-copy when keys don't need escaping.
-    entries: HashMap<Cow<'static, str>, MappingEntry>,
+    entries: HashMap<String, MappingEntry>,
 
     /// The exact span of this mapping in the source.
     exact_span: SpanInfo,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 struct MappingEntry {
-    /// Span of the key itself.
-    key_span: SpanInfo,
+    /// The key node ID.
+    key_id: NodeId,
 
     /// The value node ID (None for absent values like `foo:` or `{ foo }`).
     value_id: Option<NodeId>,
@@ -248,7 +260,7 @@ struct MappingEntry {
 }
 
 /// A sequence node (array/list) in the reduced CST.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 struct SequenceData {
     /// The item node IDs in this sequence.
     item_ids: Vec<NodeId>,
@@ -258,25 +270,23 @@ struct SequenceData {
 }
 
 /// A scalar node (leaf value) in the reduced CST.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 struct ScalarData {
     /// The exact span of this scalar in the source.
     exact_span: SpanInfo,
 
     /// The span including any block scalar indicator (|, >).
     pretty_span: Option<SpanInfo>,
-
-    /// The scalar kind (plain, single-quote, double-quote, or block).
-    /// Needed to properly extract the value (e.g., unquoting).
-    kind: ScalarKind,
 }
 
+/// An alias node that references an anchor's content.
 #[derive(Clone, Debug)]
-enum ScalarKind {
-    Plain,         // foo, 123, true
-    SingleQuote,   // 'foo bar'
-    DoubleQuote,   // "foo\nbar"
-    Block,         // | or > multiline
+struct AliasData {
+    /// The span of the alias itself (e.g., `*foo`).
+    span: SpanInfo,
+
+    /// The NodeId of the anchored content this alias references.
+    target_id: NodeId,
 }
 
 /// Span information: byte range + line/col range.
@@ -300,9 +310,12 @@ pub enum FeatureKind {
 
 /// Represents the result of a successful route.
 #[derive(Debug)]
-pub struct Feature<'tree> {
-    /// The tree-sitter node that this feature was extracted from.
-    _node: Node<'tree>,
+pub struct Feature<'doc> {
+    /// Reference to the CST node by ID (None for key-only features).
+    node_id: Option<NodeId>,
+
+    /// Borrow of the document for node lookups.
+    doc: &'doc Document,
 
     /// The exact location of the route result.
     pub location: Location,
@@ -312,34 +325,47 @@ pub struct Feature<'tree> {
     pub context: Option<Location>,
 }
 
-impl Feature<'_> {
+impl<'doc> Feature<'doc> {
     /// Return this feature's parent feature, if it has one.
-    pub fn parent(&self) -> Option<Feature<'_>> {
-        self._node.parent().map(Feature::from)
+    pub fn parent(&self) -> Option<Feature<'doc>> {
+        let node_id = self.node_id?;
+        let node = self.doc.cst.nodes.get(node_id.0)?;
+        let parent_id = node.parent_id?;
+
+        Some(Feature {
+            node_id: Some(parent_id),
+            doc: self.doc,
+            location: self
+                .doc
+                .compute_location_for_node(parent_id, QueryMode::Exact),
+            context: None,
+        })
     }
 
     /// Return this feature's [`FeatureKind`].
     pub fn kind(&self) -> FeatureKind {
-        // TODO: Use node kind IDs instead of string matching.
-
-        // Our feature's underlying node is often a
-        // `block_node` or `flow_node`, which is a container
-        // for the real kind of node we're interested in.
-        let node = match self._node.kind() {
-            "block_node" | "flow_node" => self
-                ._node
-                .child(0)
-                .expect("internal error: expected child of block_node/flow_node"),
-            _ => self._node,
+        let Some(id) = self.node_id else {
+            return FeatureKind::Scalar; // Key-only features
         };
 
-        match node.kind() {
-            "block_mapping" | "flow_mapping" => FeatureKind::Mapping,
-            "block_sequence" | "flow_sequence" => FeatureKind::Sequence,
-            "plain_scalar" | "single_quote_scalar" | "double_quote_scalar" | "block_scalar" => {
-                FeatureKind::Scalar
+        let Some(node) = self.doc.cst.nodes.get(id.0) else {
+            // Invalid NodeId - should never happen, but return safe default
+            return FeatureKind::Scalar;
+        };
+
+        match &node.kind {
+            YamlNodeKind::Mapping(_) => FeatureKind::Mapping,
+            YamlNodeKind::Sequence(_) => FeatureKind::Sequence,
+            YamlNodeKind::Scalar(_) => FeatureKind::Scalar,
+            YamlNodeKind::Alias(alias) => {
+                // Follow the alias to get the target's kind
+                match &self.doc.cst.nodes[alias.target_id.0].kind {
+                    YamlNodeKind::Mapping(_) => FeatureKind::Mapping,
+                    YamlNodeKind::Sequence(_) => FeatureKind::Sequence,
+                    YamlNodeKind::Scalar(_) => FeatureKind::Scalar,
+                    YamlNodeKind::Alias(_) => panic!("nested alias in CST"),
+                }
             }
-            kind => unreachable!("unexpected feature kind: {kind}"),
         }
     }
 
@@ -359,15 +385,7 @@ impl RangeBounds<usize> for &Feature<'_> {
     }
 }
 
-impl<'tree> From<Node<'tree>> for Feature<'tree> {
-    fn from(node: Node<'tree>) -> Self {
-        Feature {
-            _node: node,
-            location: Location::from(node),
-            context: node.parent().map(Location::from),
-        }
-    }
-}
+// Note: The From<Node> impl has been removed in favor of CST-based Feature construction
 
 /// Configures how features are extracted from a YAML document
 /// during queries.
@@ -379,15 +397,20 @@ enum QueryMode {
     /// For example, querying `foo: bar` for `foo` will return
     /// `foo: bar` instead of just `bar`.
     Pretty,
-    /// For routes that terminate in a key, make the extracted
-    /// feature only that key, rather than both the key and value ("pretty"),
-    /// or just the value ("exact").
-    ///
-    /// For example, querying `foo: bar` for `foo` will return `foo`.
-    KeyOnly,
     /// Make extracted features as "exact" as possible, e.g. by
     /// including only the exact span of the route result.
     Exact,
+}
+
+/// Result of a CST query, preserving context about how the route terminated.
+enum QueryResult<'a> {
+    /// Route ended at a node (sequence index or non-key traversal).
+    Node(NodeId),
+    /// Route ended with a key lookup in a mapping.
+    MappingKey {
+        parent_id: NodeId,
+        entry: &'a MappingEntry,
+    },
 }
 
 /// A holder type so that we can associate both source and node references
@@ -485,6 +508,9 @@ impl Deref for Tree {
 struct CstBuilder {
     nodes: Vec<YamlNodeData>,
     next_id: usize,
+    /// Map from tree-sitter node byte positions to CST NodeIds.
+    /// Used to look up the CST NodeId for anchor parents when resolving aliases.
+    ts_node_to_id: HashMap<usize, NodeId>,
 }
 
 impl CstBuilder {
@@ -492,21 +518,33 @@ impl CstBuilder {
         Self {
             nodes: Vec::new(),
             next_id: 0,
+            ts_node_to_id: HashMap::new(),
         }
     }
 
     fn alloc_id(&mut self) -> NodeId {
         let id = NodeId(self.next_id);
         self.next_id += 1;
+        // Reserve a slot in the Vec to ensure NodeId matches the index
+        self.nodes.push(YamlNodeData {
+            parent_id: None, // Placeholder, will be set by set_node
+            kind: YamlNodeKind::Scalar(ScalarData {
+                exact_span: SpanInfo {
+                    byte_range: 0..0,
+                    point_range: tree_sitter::Point { row: 0, column: 0 }..tree_sitter::Point {
+                        row: 0,
+                        column: 0,
+                    },
+                },
+                pretty_span: None,
+            }), // Placeholder
+        });
         id
     }
 
-    fn add_node(&mut self, id: NodeId, parent_id: Option<NodeId>, kind: YamlNodeKind) {
-        self.nodes.push(YamlNodeData {
-            id,
-            parent_id,
-            kind,
-        });
+    fn set_node(&mut self, id: NodeId, parent_id: Option<NodeId>, kind: YamlNodeKind) {
+        // Update the node at the correct index
+        self.nodes[id.0] = YamlNodeData { parent_id, kind };
     }
 
     fn finish(self, root_id: NodeId) -> CstStore {
@@ -525,40 +563,76 @@ fn build_node(
     source: &str,
     anchor_map: &AnchorMap,
 ) -> Result<NodeId, QueryError> {
-    // Skip wrapper nodes (document, block_node, flow_node)
+    // Skip wrapper nodes (stream, document, block_node, flow_node) and non-content nodes (comments, directives)
     let mut current = node;
-    while matches!(current.kind(), "document" | "block_node" | "flow_node") {
-        if let Some(child) = current.named_child(0) {
+    while matches!(
+        current.kind(),
+        "stream" | "document" | "block_node" | "flow_node"
+    ) {
+        // Find first content child (skip comments, directives, document markers)
+        let mut child_cursor = current.walk();
+        if let Some(child) = current.named_children(&mut child_cursor).find(|n| {
+            !matches!(
+                n.kind(),
+                "comment" | "yaml_directive" | "tag_directive" | "reserved_directive"
+            )
+        }) {
             current = child;
         } else {
             break;
         }
     }
 
-    // Handle anchors: skip to the anchored content
+    // Handle anchors: skip to the anchored content (also skipping comments)
     if current.kind() == "anchor" {
-        if let Some(content) = current.next_named_sibling() {
-            current = content;
+        if let Some(parent) = current.parent() {
+            let mut cursor = parent.walk();
+            if let Some(content) = parent
+                .named_children(&mut cursor)
+                .find(|child| child.kind() != "anchor" && child.kind() != "comment")
+            {
+                current = content;
+            }
         }
     }
 
-    // Handle aliases: resolve to the anchored content
+    // Handle aliases: create an Alias node that references the anchor's content
     if current.kind() == "alias" {
-        let alias_name = current
-            .child_by_field_name("name")
-            .and_then(|n| n.utf8_text(source.as_bytes()).ok())
-            .ok_or_else(|| QueryError::Other("alias missing name".into()))?;
+        let alias_span = span_from_node(&current);
+
+        // Extract alias name by slicing off the leading '*'
+        let alias_text = current
+            .utf8_text(source.as_bytes())
+            .map_err(|_| QueryError::Other("invalid UTF-8 in alias".into()))?;
+        let alias_name = &alias_text[1..]; // Skip the '*' character
 
         // Find the most recent anchor with this name
-        let target_node = anchor_map
+        let target_ts_node = anchor_map
             .get(alias_name)
             .and_then(|positions| positions.range(..current.start_byte()).next_back())
             .map(|(_, node)| *node)
             .ok_or_else(|| QueryError::Other(format!("undefined alias: {}", alias_name)))?;
 
-        // Recursively build the aliased node with the ALIAS's parent
-        // Note: This creates a new subtree for each alias (no structural sharing)
-        return build_node(builder, target_node, parent_id, source, anchor_map);
+        // Look up the CST NodeId for the anchor's content (already built)
+        let target_id = *builder
+            .ts_node_to_id
+            .get(&target_ts_node.start_byte())
+            .ok_or_else(|| {
+                QueryError::Other(format!("anchor content not yet built for alias: {}", alias_name))
+            })?;
+
+        // Create an Alias node with its own span but referencing the target
+        let node_id = builder.alloc_id();
+        builder.set_node(
+            node_id,
+            parent_id,
+            YamlNodeKind::Alias(AliasData {
+                span: alias_span,
+                target_id,
+            }),
+        );
+
+        return Ok(node_id);
     }
 
     // Allocate ID for this node
@@ -566,7 +640,7 @@ fn build_node(
 
     // Build node kind based on type
     let kind = match current.kind() {
-        "block_mapping" | "flow_mapping" => {
+        "block_mapping" | "flow_mapping" | "flow_pair" | "block_mapping_pair" => {
             build_mapping_node(builder, current, node_id, source, anchor_map)?
         }
         "block_sequence" | "flow_sequence" => {
@@ -577,49 +651,75 @@ fn build_node(
             YamlNodeKind::Scalar(ScalarData {
                 exact_span: span_from_node(&current),
                 pretty_span: compute_pretty_span(&current),
-                kind: infer_scalar_kind(&current),
             })
         }
     };
 
     // Store node with parent link
-    builder.add_node(node_id, parent_id, kind);
+    builder.set_node(node_id, parent_id, kind);
+
+    // Register this tree-sitter node's position in the mapping for alias resolution
+    builder.ts_node_to_id.insert(current.start_byte(), node_id);
 
     Ok(node_id)
 }
 
-/// Build a mapping node from a tree-sitter block_mapping or flow_mapping.
+/// Build a mapping node from a tree-sitter mapping or pair node.
+///
+/// Handles both explicit mappings (block_mapping, flow_mapping) which contain
+/// multiple pairs, and implicit single-entry mappings from standalone pairs
+/// (e.g., `key: value` appearing directly in a sequence like `[1, 2, key: value]`).
 fn build_mapping_node(
     builder: &mut CstBuilder,
     node: Node,
-    parent_id: NodeId,  // This mapping's ID becomes parent for children
+    parent_id: NodeId,
     source: &str,
     anchor_map: &AnchorMap,
 ) -> Result<YamlNodeKind, QueryError> {
     let mut entries = HashMap::new();
 
-    let mut cursor = node.walk();
-    for child in node.named_children(&mut cursor) {
-        // Extract key from flow_pair, block_mapping_pair, or bare flow_node
-        let (key_node, value_node_opt, pair_span) = match child.kind() {
-            "flow_pair" | "block_mapping_pair" => {
-                let key = child
-                    .child_by_field_name("key")
-                    .ok_or_else(|| QueryError::MissingChildField(child.kind().into(), "key"))?;
-                let value = child.child_by_field_name("value");
-                (key, value, span_from_node(&child))
-            }
-            "flow_node" => {
-                // Bare key in flow mapping like { foo }
-                (child, None, span_from_node(&child))
-            }
-            _ => continue,
+    // Determine if this is a standalone pair (implicit mapping) or a full mapping
+    let pairs: Vec<(Node, SpanInfo)> = match node.kind() {
+        "flow_pair" | "block_mapping_pair" => {
+            // Standalone pair - treat as single-entry mapping
+            vec![(node, span_from_node(&node))]
+        }
+        _ => {
+            // Full mapping - collect all pair children
+            let mut cursor = node.walk();
+            node.named_children(&mut cursor)
+                .filter_map(|child| match child.kind() {
+                    "flow_pair" | "block_mapping_pair" => {
+                        Some((child, span_from_node(&child)))
+                    }
+                    "flow_node" => {
+                        // Bare key in flow mapping like { foo }
+                        // Use parent's span for yamlpatch compatibility
+                        Some((child, span_from_node(&node)))
+                    }
+                    _ => None,
+                })
+                .collect()
+        }
+    };
+
+    for (pair_node, pair_span) in pairs {
+        // Extract key node - for bare flow_node, it IS the key
+        let (key_node, value_node_opt) = if pair_node.kind() == "flow_node" {
+            (pair_node, None)
+        } else {
+            let key = pair_node
+                .child_by_field_name("key")
+                .ok_or_else(|| QueryError::MissingChildField(pair_node.kind().into(), "key"))?;
+            let value = pair_node.child_by_field_name("value");
+            (key, value)
         };
 
-        // Extract key string (handle quotes, anchors)
         let key_str = extract_key_string(&key_node, source)?;
 
-        // Build value node with THIS node as parent
+        // Build key as a CST node
+        let key_id = build_node(builder, key_node, Some(parent_id), source, anchor_map)?;
+
         let value_id = if let Some(val_node) = value_node_opt {
             Some(build_node(builder, val_node, Some(parent_id), source, anchor_map)?)
         } else {
@@ -629,7 +729,7 @@ fn build_mapping_node(
         entries.insert(
             key_str,
             MappingEntry {
-                key_span: span_from_node(&key_node),
+                key_id,
                 value_id,
                 pair_span,
             },
@@ -654,9 +754,19 @@ fn build_sequence_node(
 
     let mut cursor = node.walk();
     for child in node.named_children(&mut cursor) {
+        // Skip comments - they are not sequence items
+        if child.kind() == "comment" {
+            continue;
+        }
+
         // Handle block_sequence_item wrappers
         let content = if child.kind() == "block_sequence_item" {
-            child.named_child(0).unwrap_or(child)
+            // Get the first non-comment named child
+            let mut item_cursor = child.walk();
+            child
+                .named_children(&mut item_cursor)
+                .find(|n| n.kind() != "comment")
+                .unwrap_or(child)
         } else {
             child
         };
@@ -672,7 +782,7 @@ fn build_sequence_node(
 }
 
 /// Extract a key string from a key node, handling quotes and anchors.
-fn extract_key_string(node: &Node, source: &str) -> Result<Cow<'static, str>, QueryError> {
+fn extract_key_string(node: &Node, source: &str) -> Result<String, QueryError> {
     // Skip anchor nodes to get to the actual key
     let mut cursor = node.walk();
     let scalar = node
@@ -682,7 +792,7 @@ fn extract_key_string(node: &Node, source: &str) -> Result<Cow<'static, str>, Qu
 
     let text = scalar
         .utf8_text(source.as_bytes())
-        .map_err(|_| QueryError::Other("invalid UTF-8 in key".into()))?;
+        .map_err(|e| QueryError::Other(format!("invalid UTF-8 in key: {}", e)))?;
 
     // Unquote if necessary
     let unquoted = match scalar.kind() {
@@ -690,9 +800,9 @@ fn extract_key_string(node: &Node, source: &str) -> Result<Cow<'static, str>, Qu
             let mut chars = text.chars();
             chars.next(); // Skip opening quote
             chars.next_back(); // Skip closing quote
-            Cow::Owned(chars.as_str().to_string())
+            chars.as_str().to_string()
         }
-        _ => Cow::Owned(text.to_string()), // TODO: Use Cow::Borrowed when possible
+        _ => text.to_string(),
     };
 
     Ok(unquoted)
@@ -716,16 +826,6 @@ fn compute_pretty_span(node: &Node) -> Option<SpanInfo> {
     }
 }
 
-/// Infer the scalar kind from a tree-sitter node.
-fn infer_scalar_kind(node: &Node) -> ScalarKind {
-    match node.kind() {
-        "single_quote_scalar" => ScalarKind::SingleQuote,
-        "double_quote_scalar" => ScalarKind::DoubleQuote,
-        "block_scalar" => ScalarKind::Block,
-        _ => ScalarKind::Plain,
-    }
-}
-
 /// Represents a queryable YAML document.
 #[derive(Clone)]
 pub struct Document {
@@ -739,23 +839,18 @@ pub struct Document {
     /// Line/column index for the source.
     line_index: LineIndex,
 
-    // NOTE: These field IDs are kept temporarily for backwards compatibility
-    // with the old query_node implementation. They will be removed once
-    // all query methods are migrated to use the CST.
-    document_id: u16,
-    block_node_id: u16,
-    flow_node_id: u16,
-    block_sequence_id: u16,
-    flow_sequence_id: u16,
-    block_mapping_id: u16,
-    flow_mapping_id: u16,
-    block_mapping_pair_id: u16,
-    flow_pair_id: u16,
-    block_sequence_item_id: u16,
+    // Field IDs for tree-sitter nodes, used for comment extraction
     comment_id: u16,
-    anchor_id: u16,
-    alias_id: u16,
-    block_scalar_id: u16,
+}
+
+impl std::fmt::Debug for Document {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Document")
+            .field("cst", &self.cst)
+            .field("line_index", &self.line_index)
+            .field("comment_id", &self.comment_id)
+            .finish()
+    }
 }
 
 impl Document {
@@ -791,7 +886,7 @@ impl Document {
         let root_id = build_node(
             &mut builder,
             root_node,
-            None,  // No parent for root
+            None, // No parent for root
             tree_struct.borrow_owner().source.as_str(),
             tree_struct.borrow_dependent(),
         )?;
@@ -801,20 +896,7 @@ impl Document {
             tree: tree_struct,
             cst,
             line_index,
-            document_id: language.id_for_node_kind("document", true),
-            block_node_id: language.id_for_node_kind("block_node", true),
-            flow_node_id: language.id_for_node_kind("flow_node", true),
-            block_sequence_id: language.id_for_node_kind("block_sequence", true),
-            flow_sequence_id: language.id_for_node_kind("flow_sequence", true),
-            block_mapping_id: language.id_for_node_kind("block_mapping", true),
-            flow_mapping_id: language.id_for_node_kind("flow_mapping", true),
-            block_mapping_pair_id: language.id_for_node_kind("block_mapping_pair", true),
-            flow_pair_id: language.id_for_node_kind("flow_pair", true),
-            block_sequence_item_id: language.id_for_node_kind("block_sequence_item", true),
             comment_id: language.id_for_node_kind("comment", true),
-            anchor_id: language.id_for_node_kind("anchor", true),
-            alias_id: language.id_for_node_kind("alias", true),
-            block_scalar_id: language.id_for_node_kind("block_scalar", true),
         })
     }
 
@@ -830,16 +912,102 @@ impl Document {
         &self.tree.borrow_owner().source
     }
 
-    /// Resolve an anchor by name, returning the target node that was active
-    /// at the given position. For duplicate anchors, this returns the most
-    /// recent definition that appears before `position`.
-    fn resolve_anchor(&self, name: &str, position: usize) -> Option<Node<'_>> {
-        self.tree
-            .borrow_dependent()
-            .get(name)?
-            .range(..position)
-            .next_back()
-            .map(|(_, node)| *node)
+    /// Compute a Location for a CST node by ID.
+    fn compute_location_for_node(&self, node_id: NodeId, mode: QueryMode) -> Location {
+        let node = &self.cst.nodes[node_id.0];
+        let span = match (&node.kind, mode) {
+            (YamlNodeKind::Scalar(scalar), QueryMode::Pretty) => {
+                scalar.pretty_span.as_ref().unwrap_or(&scalar.exact_span)
+            }
+            (YamlNodeKind::Mapping(map), _) => &map.exact_span,
+            (YamlNodeKind::Sequence(seq), _) => &seq.exact_span,
+            (YamlNodeKind::Scalar(scalar), _) => &scalar.exact_span,
+            // Alias nodes use their own span (the *alias location), not the target's
+            (YamlNodeKind::Alias(alias), _) => &alias.span,
+        };
+
+        Location::from_span(span, &self.line_index)
+    }
+
+    /// Resolve an alias to its target, following chains if necessary.
+    fn resolve_alias(&self, node_id: NodeId) -> NodeId {
+        match &self.cst.nodes[node_id.0].kind {
+            YamlNodeKind::Alias(alias) => self.resolve_alias(alias.target_id),
+            _ => node_id,
+        }
+    }
+
+    /// Query the CST following the route, returning context about how the route terminated.
+    fn query_cst(&self, route: &Route) -> Result<QueryResult<'_>, QueryError> {
+        let mut current_id = self.resolve_alias(self.cst.root_id);
+
+        for (i, component) in route.route.iter().enumerate() {
+            let current = &self.cst.nodes[current_id.0];
+            let is_last = i == route.route.len() - 1;
+
+            match (&current.kind, component) {
+                (YamlNodeKind::Mapping(map), Component::Key(key)) => {
+                    let entry = map
+                        .entries
+                        .get(key.as_ref())
+                        .ok_or_else(|| QueryError::ExhaustedMapping(key.to_string()))?;
+
+                    if is_last {
+                        return Ok(QueryResult::MappingKey {
+                            parent_id: current_id,
+                            entry,
+                        });
+                    }
+
+                    // Resolve aliases when moving to next node
+                    current_id = self.resolve_alias(entry.value_id.ok_or_else(|| {
+                        QueryError::Other(format!("absent value for key: {}", key))
+                    })?);
+                }
+                (YamlNodeKind::Sequence(seq), Component::Index(idx)) => {
+                    // Resolve aliases when moving to next node
+                    current_id = self.resolve_alias(*seq
+                        .item_ids
+                        .get(*idx)
+                        .ok_or(QueryError::ExhaustedList(*idx, seq.item_ids.len()))?);
+                }
+                (YamlNodeKind::Mapping(_), Component::Index(idx)) => {
+                    return Err(QueryError::ExpectedList(*idx));
+                }
+                (YamlNodeKind::Sequence(_), Component::Key(key)) => {
+                    return Err(QueryError::ExpectedMapping(key.to_string()));
+                }
+                (YamlNodeKind::Scalar(_), Component::Key(key)) => {
+                    return Err(QueryError::ExpectedMapping(key.to_string()));
+                }
+                (YamlNodeKind::Scalar(_), Component::Index(idx)) => {
+                    return Err(QueryError::ExpectedList(*idx));
+                }
+                (YamlNodeKind::Alias(_), _) => {
+                    panic!("alias should have been resolved")
+                }
+            }
+        }
+
+        Ok(QueryResult::Node(current_id))
+    }
+
+    /// Create a Feature from a CST node.
+    fn create_feature(&self, node_id: NodeId, mode: QueryMode) -> Feature<'_> {
+        let location = self.compute_location_for_node(node_id, mode);
+
+        // Compute context from parent if it exists
+        let node = &self.cst.nodes[node_id.0];
+        let context = node
+            .parent_id
+            .map(|parent_id| self.compute_location_for_node(parent_id, QueryMode::Exact));
+
+        Feature {
+            node_id: Some(node_id),
+            doc: self,
+            location,
+            context,
+        }
     }
 
     /// Returns a [`Feature`] for the topmost semantic object in this document.
@@ -847,8 +1015,7 @@ impl Document {
     /// This is typically useful as a "fallback" feature, e.g. for positioning
     /// relative to the "top" of the document.
     pub fn top_feature(&self) -> Result<Feature<'_>, QueryError> {
-        let top_node = self.top_object()?;
-        Ok(top_node.into())
+        Ok(self.create_feature(self.cst.root_id, QueryMode::Exact))
     }
 
     /// Returns whether the given range is spanned by a comment node.
@@ -875,7 +1042,7 @@ impl Document {
     ///
     /// All errors become `false`.
     pub fn query_exists(&self, route: &Route) -> bool {
-        self.query_node(route, QueryMode::Exact).is_ok()
+        self.query_exact(route).is_ok()
     }
 
     /// Perform a route on the current document, returning a `Feature`
@@ -888,7 +1055,15 @@ impl Document {
     /// For example, querying `foo: bar` for `foo` will return
     /// `foo: bar` instead of just `bar`.
     pub fn query_pretty(&self, route: &Route) -> Result<Feature<'_>, QueryError> {
-        self.query_node(route, QueryMode::Pretty).map(|n| n.into())
+        match self.query_cst(route)? {
+            QueryResult::MappingKey { parent_id, entry } => Ok(Feature {
+                node_id: entry.value_id,
+                doc: self,
+                location: Location::from_span(&entry.pair_span, &self.line_index),
+                context: Some(self.compute_location_for_node(parent_id, QueryMode::Exact)),
+            }),
+            QueryResult::Node(node_id) => Ok(self.create_feature(node_id, QueryMode::Pretty)),
+        }
     }
 
     /// Perform a route on the current document, returning a `Feature`
@@ -901,15 +1076,22 @@ impl Document {
     /// For example, querying `foo: bar` for `foo` will return
     /// just `bar` instead of `foo: bar`.
     pub fn query_exact(&self, route: &Route) -> Result<Option<Feature<'_>>, QueryError> {
-        let node = self.query_node(route, QueryMode::Exact)?;
-
-        if node.kind_id() == self.block_mapping_pair_id || node.kind_id() == self.flow_pair_id {
-            // If the route matches a mapping pair, we return None,
-            // since this indicates an absent value.
-            Ok(None)
-        } else {
-            // Otherwise, we return the node as a feature.
-            Ok(Some(node.into()))
+        match self.query_cst(route)? {
+            QueryResult::MappingKey { parent_id, entry } => {
+                let Some(value_id) = entry.value_id else {
+                    // Absent value like `foo:` or `{ foo }`
+                    return Ok(None);
+                };
+                // Resolve aliases to get the semantic value's location
+                let resolved_id = self.resolve_alias(value_id);
+                Ok(Some(Feature {
+                    node_id: Some(resolved_id),
+                    doc: self,
+                    location: self.compute_location_for_node(resolved_id, QueryMode::Exact),
+                    context: Some(self.compute_location_for_node(parent_id, QueryMode::Exact)),
+                }))
+            }
+            QueryResult::Node(node_id) => Ok(Some(self.create_feature(node_id, QueryMode::Exact))),
         }
     }
 
@@ -923,13 +1105,17 @@ impl Document {
     /// For example, querying `foo: bar` for `foo` will return
     /// just `foo` instead of `foo: bar` or `bar`.
     pub fn query_key_only(&self, route: &Route) -> Result<Feature<'_>, QueryError> {
-        if !matches!(route.route.last(), Some(Component::Key(_))) {
-            return Err(QueryError::Other(
-                "route must end with a key component for key-only routes".into(),
-            ));
+        match self.query_cst(route)? {
+            QueryResult::MappingKey { parent_id, entry } => Ok(Feature {
+                node_id: Some(entry.key_id),
+                doc: self,
+                location: self.compute_location_for_node(entry.key_id, QueryMode::Exact),
+                context: Some(self.compute_location_for_node(parent_id, QueryMode::Exact)),
+            }),
+            QueryResult::Node(_) => Err(QueryError::Other(
+                "key_only requires route to end with key".into(),
+            )),
         }
-
-        self.query_node(route, QueryMode::KeyOnly).map(|n| n.into())
     }
 
     /// Returns a string slice of the original document corresponding to
@@ -1000,6 +1186,7 @@ impl Document {
         let end_line = feature.location.point_span.1.0;
 
         fn trawl<'tree>(
+            doc: &'tree Document,
             node: &Node<'tree>,
             comment_id: u16,
             start_line: usize,
@@ -1022,17 +1209,23 @@ impl Document {
                             && c.start_position().row >= start_line
                             && c.end_position().row <= end_line
                     })
-                    .map(|c| c.into()),
+                    .map(|c| Feature {
+                        node_id: None, // Comments aren't in CST
+                        doc,
+                        location: Location::from(c),
+                        context: None,
+                    }),
             );
 
             for child in node.children(&mut cur) {
-                comments.extend(trawl(&child, comment_id, start_line, end_line));
+                comments.extend(trawl(doc, &child, comment_id, start_line, end_line));
             }
 
             comments
         }
 
         trawl(
+            self,
             &self.tree.root_node(),
             self.comment_id,
             start_line,
@@ -1043,344 +1236,6 @@ impl Document {
     /// Returns whether this document contains any YAML anchors.
     pub fn has_anchors(&self) -> bool {
         !self.tree.borrow_dependent().is_empty()
-    }
-
-    /// Returns the topmost semantic object in the YAML document,
-    /// i.e. the node corresponding to the first block or flow feature.
-    fn top_object(&self) -> Result<Node<'_>, QueryError> {
-        // All tree-sitter-yaml trees start with a `stream` node.
-        let stream = self.tree.root_node();
-
-        // The `document` child is the "body" of the YAML document; it
-        // might not be the first node in the `stream` if there are comments.
-        let mut cur = stream.walk();
-        let document = stream
-            .named_children(&mut cur)
-            .find(|c| c.kind_id() == self.document_id)
-            .ok_or_else(|| QueryError::MissingChild(stream.kind().into(), "document".into()))?;
-
-        // The document might have a directives section, which we need to
-        // skip over. We do this by finding the top-level `block_node`
-        // or `flow_node`, of which one will be present depending on how
-        // the top-level document value is expressed.
-        let top_node = document
-            .named_children(&mut cur)
-            .find(|c| c.kind_id() == self.block_node_id || c.kind_id() == self.flow_node_id)
-            .ok_or_else(|| QueryError::Other("document has no block_node or flow_node".into()))?;
-
-        Ok(top_node)
-    }
-
-    fn query_node(&self, route: &Route, mode: QueryMode) -> Result<Node<'_>, QueryError> {
-        let mut focus_node = self.top_object()?;
-        for component in &route.route {
-            match self.descend(&focus_node, component) {
-                Ok(next) => focus_node = next,
-                Err(e) => return Err(e),
-            }
-        }
-
-        // Our focus node might be an alias, in which case we need to
-        // do one last leap to get our "real" final focus node.
-        // TODO(ww): What about nested aliases?
-        focus_node = match focus_node.child(0) {
-            Some(child) if child.kind_id() == self.alias_id => {
-                let alias_name = child
-                    .utf8_text(self.source().as_bytes())
-                    .expect("impossible: alias name should be UTF-8 by construction");
-                self.resolve_anchor(&alias_name[1..], child.start_byte())
-                    .ok_or_else(|| QueryError::Other(format!("unknown alias: {}", alias_name)))?
-            }
-            // Our focus node might have an anchor prefix (e.g. `[&x v, *x]`),
-            // in which case we skip to the non-anchor sibling.
-            Some(child) if child.kind_id() == self.anchor_id => {
-                let mut cursor = focus_node.walk();
-                focus_node
-                    .named_children(&mut cursor)
-                    .find(|n| n.kind_id() != self.anchor_id)
-                    .unwrap_or(focus_node)
-            }
-            _ => focus_node,
-        };
-
-        focus_node = match mode {
-            QueryMode::Pretty => {
-                // If we're in "pretty" mode, we want to return the
-                // block/flow pair node that contains the key.
-                // This results in a (subjectively) more intuitive extracted feature,
-                // since `foo: bar` gets extracted for `foo` instead of just `bar`.
-                //
-                // NOTE: We might already be on the block/flow pair if we terminated
-                // with an absent value, in which case we don't need to do this cleanup.
-                if matches!(route.route.last(), Some(Component::Key(_)))
-                    && focus_node.kind_id() != self.block_mapping_pair_id
-                    && focus_node.kind_id() != self.flow_pair_id
-                {
-                    focus_node.parent().expect("missing parent of focus node")
-                } else {
-                    focus_node
-                }
-            }
-            QueryMode::KeyOnly => {
-                // If we're in "key only" mode, we need to walk back up to
-                // the parent block/flow pair node that contains the key,
-                // and isolate on the key child instead.
-
-                let parent_node = if focus_node.kind_id() == self.block_mapping_pair_id
-                    || focus_node.kind_id() == self.flow_pair_id
-                {
-                    // If we're already on block/flow pair, then we're already
-                    // the key's parent.
-                    focus_node
-                } else if focus_node.kind_id() == self.block_scalar_id {
-                    // We might be on the internal `block_scalar` node, if
-                    // we got here via an alias. We need to go up two levels
-                    // to get to the mapping pair.
-                    focus_node
-                        .parent()
-                        .expect("missing parent of focus node")
-                        .parent()
-                        .expect("missing grandparent of focus node")
-                } else {
-                    // Otherwise, we expect to be on the `block_node`
-                    // or `flow_node`, so we go up one level.
-                    focus_node.parent().expect("missing parent of focus node")
-                };
-
-                if parent_node.kind_id() == self.flow_mapping_id {
-                    // Handle the annoying `foo: { key }` case, where our "parent"
-                    // is actually a `flow_mapping` instead of a proper block/flow pair.
-                    // To handle this, we get the first `flow_node` child of the
-                    // flow_mapping, which is the "key".
-                    let mut cur = parent_node.walk();
-                    parent_node
-                        .named_children(&mut cur)
-                        .find(|n| n.kind_id() == self.flow_node_id)
-                        .ok_or_else(|| {
-                            QueryError::MissingChildField(parent_node.kind().into(), "flow_node")
-                        })?
-                } else {
-                    parent_node.child_by_field_name("key").ok_or_else(|| {
-                        QueryError::MissingChildField(parent_node.kind().into(), "key")
-                    })?
-                }
-            }
-            // Nothing special to do in exact mode.
-            QueryMode::Exact => focus_node,
-        };
-
-        // If we're extracting "pretty" features, we clean up the final
-        // node a bit to have it point to the parent `block_mapping_pair`.
-        // This results in a (subjectively) more intuitive extracted feature,
-        // since `foo: bar` gets extracted for `foo` instead of just `bar`.
-        //
-        // NOTE: We might already be on the block_mapping_pair if we terminated
-        // with an absent value, in which case we don't need to do this cleanup.
-        if matches!(mode, QueryMode::Pretty)
-            && matches!(route.route.last(), Some(Component::Key(_)))
-            && focus_node.kind_id() != self.block_mapping_pair_id
-        {
-            focus_node = focus_node.parent().expect("missing parent of focus node")
-        }
-
-        Ok(focus_node)
-    }
-
-    fn descend<'b>(
-        &'b self,
-        node: &Node<'b>,
-        component: &Component,
-    ) -> Result<Node<'b>, QueryError> {
-        // The cursor is assumed to start on a block_node or flow_node,
-        // which has a child containing the inner scalar/vector/alias
-        // type we're descending through.
-        //
-        // To get to that child, we might have to skip over any
-        // anchor nodes that we're not actually aliasing through
-        // in this descent step.
-        //
-        // For example, for a YAML snippet like:
-        //
-        // ```yaml
-        // foo: &foo
-        //   bar: baz
-        // ```
-        //
-        // ...the relevant part of the CST looks roughly like:
-        //
-        // ```
-        // block_node         <- `node` points here
-        // |--- anchor        <- we need to skip this
-        // |--- block_mapping <- we want `child` to point here
-        // ```
-        let mut child = {
-            let mut cursor = node.walk();
-            node.named_children(&mut cursor)
-                .find(|n| n.kind_id() != self.anchor_id)
-                .ok_or_else(|| {
-                    QueryError::Other(format!(
-                        "node of kind {} has no non-anchor child",
-                        node.kind()
-                    ))
-                })?
-        };
-
-        // We might be on an alias node, in which case we need to
-        // jump to the alias's target via the anchor map.
-        if child.kind_id() == self.alias_id {
-            let alias_name = node
-                .utf8_text(self.source().as_bytes())
-                .expect("impossible: alias name should be UTF-8 by construction");
-
-            child = self
-                .resolve_anchor(&alias_name[1..], node.start_byte())
-                .ok_or_else(|| QueryError::Other(format!("unknown alias: {}", alias_name)))?;
-        }
-
-        // We expect the child to be a sequence or mapping of either
-        // flow or block type.
-        if child.kind_id() == self.block_mapping_id || child.kind_id() == self.flow_mapping_id {
-            match component {
-                Component::Key(key) => self.descend_mapping(&child, key),
-                Component::Index(idx) => Err(QueryError::ExpectedList(*idx)),
-            }
-        } else if child.kind_id() == self.block_sequence_id
-            || child.kind_id() == self.flow_sequence_id
-        {
-            match component {
-                Component::Index(idx) => self.descend_sequence(&child, *idx),
-                Component::Key(key) => Err(QueryError::ExpectedMapping(key.to_string())),
-            }
-        } else {
-            Err(QueryError::UnexpectedNode(child.kind().into()))
-        }
-    }
-
-    fn descend_mapping<'b>(&self, node: &Node<'b>, expected: &str) -> Result<Node<'b>, QueryError> {
-        let mut cur = node.walk();
-        for child in node.named_children(&mut cur) {
-            let key = match child.kind_id() {
-                // If we're on a `flow_pair` or `block_mapping_pair`, we
-                // need to get the `key` child.
-                id if id == self.flow_pair_id || id == self.block_mapping_pair_id => child
-                    .child_by_field_name("key")
-                    .ok_or_else(|| QueryError::MissingChildField(child.kind().into(), "key"))?,
-                // NOTE: Annoying edge case: if we have a flow mapping
-                // like `{ foo }`, then `foo` is a `flow_node` instead
-                // of a `flow_pair`.
-                id if id == self.flow_node_id => child,
-                _ => continue,
-            };
-
-            // NOTE: To get the key's actual value, we need to get down to its
-            // inner scalar. This is slightly annoying, since keys can be
-            // quoted strings with no interior unquoted child. In those cases,
-            // we need to manually unquote them.
-            //
-            // NOTE: text unwraps are infallible, since our document is UTF-8.
-            // NOTE: The key might have an anchor prefix (e.g. `{ &v foo: bar }`),
-            // so we need to skip any anchor nodes to find the actual scalar.
-            let key_value = {
-                let mut cursor = key.walk();
-                let scalar = key
-                    .named_children(&mut cursor)
-                    .find(|n| n.kind_id() != self.anchor_id);
-
-                match scalar {
-                    Some(scalar) => {
-                        let key_value = scalar
-                            .utf8_text(self.source().as_bytes())
-                            .expect("impossible: value for key should be UTF-8 by construction");
-
-                        match scalar.kind() {
-                            "single_quote_scalar" | "double_quote_scalar" => {
-                                let mut chars = key_value.chars();
-                                chars.next();
-                                chars.next_back();
-                                chars.as_str()
-                            }
-                            _ => key_value,
-                        }
-                    }
-                    None => key
-                        .utf8_text(self.source().as_bytes())
-                        .expect("impossible: key should be UTF-8 by construction"),
-                }
-            };
-
-            if key_value == expected {
-                // HACK: a mapping key might not have a corresponding value,
-                // in which case we fall back and return the `block_mapping_pair`
-                // itself here. This technically breaks our contract of returning
-                // only block_node/flow_node nodes during descent, but not
-                // in a way that matters (since an empty value is terminal anyways).
-                return Ok(child.child_by_field_name("value").unwrap_or(child));
-            }
-        }
-
-        // None of the keys in the mapping matched.
-        Err(QueryError::ExhaustedMapping(expected.into()))
-    }
-
-    /// Given a `block_sequence` or `flow_sequence` node, return
-    /// a full list of child nodes after expanding any aliases present.
-    ///
-    /// The returned child nodes are the inner
-    /// `block_node`/`flow_node`/`flow_pair` nodes for each sequence item.
-    fn flatten_sequence<'b>(&'b self, node: &Node<'b>) -> Result<Vec<Node<'b>>, QueryError> {
-        let mut children = vec![];
-
-        let mut cur = node.walk();
-        for child in node.named_children(&mut cur).filter(|child| {
-            child.kind_id() == self.block_sequence_item_id
-                || child.kind_id() == self.flow_node_id
-                || child.kind_id() == self.flow_pair_id
-        }) {
-            let mut child = child;
-
-            // If we have a `block_sequence_item`, we need to get its
-            // inner `block_node`/`flow_node`, which might be interceded
-            // by comments.
-            if child.kind_id() == self.block_sequence_item_id {
-                let mut cur = child.walk();
-                child = child
-                    .named_children(&mut cur)
-                    .find(|c| c.kind_id() == self.block_node_id || c.kind_id() == self.flow_node_id)
-                    .ok_or_else(|| {
-                        QueryError::MissingChild(child.kind().into(), "block_sequence_item".into())
-                    })?;
-            }
-
-            // `child` is now a `block_node`, a `flow_node`, or `flow_pair`:
-            //
-            // `block_node` looks like `- a: b`
-            // `flow_node` looks like `- a`
-            // `flow_pair` looks like `[a: b]`
-            //
-            // Aliases are drop-in replacements for their anchored values,
-            // so we just keep the child as-is. The alias will be resolved
-            // during descent when we navigate into it.
-            children.push(child);
-        }
-
-        Ok(children)
-    }
-
-    fn descend_sequence<'b>(&'b self, node: &Node<'b>, idx: usize) -> Result<Node<'b>, QueryError> {
-        let children = self.flatten_sequence(node)?;
-        let Some(child) = children.get(idx) else {
-            return Err(QueryError::ExhaustedList(idx, children.len()));
-        };
-
-        if child.kind_id() == self.flow_pair_id {
-            // Similarly, if our index happens to be a `flow_pair`, we need to
-            // get the `value` child to get the next `flow_node`.
-            // The `value` might not be present (e.g. `{foo: }`), in which case
-            // we treat the `flow_pair` itself as terminal like with the mapping hack.
-            return Ok(child.child_by_field_name("value").unwrap_or(*child));
-        }
-
-        Ok(*child)
     }
 }
 

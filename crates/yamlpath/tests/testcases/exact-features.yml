@@ -76,10 +76,10 @@ queries:
     mode: exact
     expected: "<<empty>>"
 
-  # BUG: should be "<<empty>>"
+  # Fixed: now correctly returns <<empty>> for absent values
   - query: [flow4, emptykey]
     mode: exact
-    expected: "emptykey"
+    expected: "<<empty>>"
 
   - query: [comments, foo]
     mode: exact
