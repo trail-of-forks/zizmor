@@ -193,18 +193,107 @@ impl From<Node<'_>> for Location {
     }
 }
 
-/// Describes the feature's kind, i.e. whether it's a block/flow aggregate
-/// or a scalar value.
+/// Unique identifier for a CST node. Provides O(1) parent access without lifetime issues.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct NodeId(usize);
+
+/// Storage for all CST nodes. Single source of truth for the entire tree.
+#[derive(Clone)]
+struct CstStore {
+    /// All nodes stored in a contiguous Vec for cache-friendly access.
+    nodes: Vec<YamlNodeData>,
+    /// The root node of the document.
+    root_id: NodeId,
+}
+
+/// A node in the CST with parent tracking via NodeId.
+#[derive(Clone)]
+struct YamlNodeData {
+    /// Unique identifier for this node.
+    id: NodeId,
+    /// Parent node ID (None only for root).
+    parent_id: Option<NodeId>,
+    /// The node's type and data.
+    kind: YamlNodeKind,
+}
+
+#[derive(Clone)]
+enum YamlNodeKind {
+    Mapping(MappingData),
+    Sequence(SequenceData),
+    Scalar(ScalarData),
+}
+
+/// A mapping node (object/dict) in the reduced CST.
+#[derive(Clone)]
+struct MappingData {
+    /// Map from key string to entry (key location + optional value node).
+    /// Uses Cow for zero-copy when keys don't need escaping.
+    entries: HashMap<Cow<'static, str>, MappingEntry>,
+
+    /// The exact span of this mapping in the source.
+    exact_span: SpanInfo,
+}
+
+#[derive(Clone)]
+struct MappingEntry {
+    /// Span of the key itself.
+    key_span: SpanInfo,
+
+    /// The value node ID (None for absent values like `foo:` or `{ foo }`).
+    value_id: Option<NodeId>,
+
+    /// Span of the entire mapping pair (key: value).
+    pair_span: SpanInfo,
+}
+
+/// A sequence node (array/list) in the reduced CST.
+#[derive(Clone)]
+struct SequenceData {
+    /// The item node IDs in this sequence.
+    item_ids: Vec<NodeId>,
+
+    /// The exact span of this sequence in the source.
+    exact_span: SpanInfo,
+}
+
+/// A scalar node (leaf value) in the reduced CST.
+#[derive(Clone)]
+struct ScalarData {
+    /// The exact span of this scalar in the source.
+    exact_span: SpanInfo,
+
+    /// The span including any block scalar indicator (|, >).
+    pretty_span: Option<SpanInfo>,
+
+    /// The scalar kind (plain, single-quote, double-quote, or block).
+    /// Needed to properly extract the value (e.g., unquoting).
+    kind: ScalarKind,
+}
+
+#[derive(Clone, Debug)]
+enum ScalarKind {
+    Plain,         // foo, 123, true
+    SingleQuote,   // 'foo bar'
+    DoubleQuote,   // "foo\nbar"
+    Block,         // | or > multiline
+}
+
+/// Span information: byte range + line/col range.
+#[derive(Clone, Debug)]
+struct SpanInfo {
+    byte_range: std::ops::Range<usize>,
+    point_range: std::ops::Range<tree_sitter::Point>,
+}
+
+/// Describes the feature's kind, i.e. whether it's a mapping, sequence,
+/// or scalar value.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum FeatureKind {
-    /// A block-style mapping, e.g. `foo: bar`.
-    BlockMapping,
-    /// A block-style sequence, e.g. `- foo`.
-    BlockSequence,
-    /// A flow-style mapping, e.g. `{foo: bar}`.
-    FlowMapping,
-    /// A flow-style sequence, e.g. `[foo, bar]`.
-    FlowSequence,
+    /// A mapping (object/dict), either block or flow style.
+    Mapping,
+    /// A sequence (array/list), either block or flow style.
+    Sequence,
     /// Any sort of scalar value.
     Scalar,
 }
@@ -245,10 +334,8 @@ impl Feature<'_> {
         };
 
         match node.kind() {
-            "block_mapping" => FeatureKind::BlockMapping,
-            "block_sequence" => FeatureKind::BlockSequence,
-            "flow_mapping" => FeatureKind::FlowMapping,
-            "flow_sequence" => FeatureKind::FlowSequence,
+            "block_mapping" | "flow_mapping" => FeatureKind::Mapping,
+            "block_sequence" | "flow_sequence" => FeatureKind::Sequence,
             "plain_scalar" | "single_quote_scalar" | "double_quote_scalar" | "block_scalar" => {
                 FeatureKind::Scalar
             }
@@ -394,21 +481,273 @@ impl Deref for Tree {
     }
 }
 
+/// Builder for constructing the CST with automatic parent tracking.
+struct CstBuilder {
+    nodes: Vec<YamlNodeData>,
+    next_id: usize,
+}
+
+impl CstBuilder {
+    fn new() -> Self {
+        Self {
+            nodes: Vec::new(),
+            next_id: 0,
+        }
+    }
+
+    fn alloc_id(&mut self) -> NodeId {
+        let id = NodeId(self.next_id);
+        self.next_id += 1;
+        id
+    }
+
+    fn add_node(&mut self, id: NodeId, parent_id: Option<NodeId>, kind: YamlNodeKind) {
+        self.nodes.push(YamlNodeData {
+            id,
+            parent_id,
+            kind,
+        });
+    }
+
+    fn finish(self, root_id: NodeId) -> CstStore {
+        CstStore {
+            nodes: self.nodes,
+            root_id,
+        }
+    }
+}
+
+/// Build the reduced CST from a tree-sitter node.
+fn build_node(
+    builder: &mut CstBuilder,
+    node: Node,
+    parent_id: Option<NodeId>,
+    source: &str,
+    anchor_map: &AnchorMap,
+) -> Result<NodeId, QueryError> {
+    // Skip wrapper nodes (document, block_node, flow_node)
+    let mut current = node;
+    while matches!(current.kind(), "document" | "block_node" | "flow_node") {
+        if let Some(child) = current.named_child(0) {
+            current = child;
+        } else {
+            break;
+        }
+    }
+
+    // Handle anchors: skip to the anchored content
+    if current.kind() == "anchor" {
+        if let Some(content) = current.next_named_sibling() {
+            current = content;
+        }
+    }
+
+    // Handle aliases: resolve to the anchored content
+    if current.kind() == "alias" {
+        let alias_name = current
+            .child_by_field_name("name")
+            .and_then(|n| n.utf8_text(source.as_bytes()).ok())
+            .ok_or_else(|| QueryError::Other("alias missing name".into()))?;
+
+        // Find the most recent anchor with this name
+        let target_node = anchor_map
+            .get(alias_name)
+            .and_then(|positions| positions.range(..current.start_byte()).next_back())
+            .map(|(_, node)| *node)
+            .ok_or_else(|| QueryError::Other(format!("undefined alias: {}", alias_name)))?;
+
+        // Recursively build the aliased node with the ALIAS's parent
+        // Note: This creates a new subtree for each alias (no structural sharing)
+        return build_node(builder, target_node, parent_id, source, anchor_map);
+    }
+
+    // Allocate ID for this node
+    let node_id = builder.alloc_id();
+
+    // Build node kind based on type
+    let kind = match current.kind() {
+        "block_mapping" | "flow_mapping" => {
+            build_mapping_node(builder, current, node_id, source, anchor_map)?
+        }
+        "block_sequence" | "flow_sequence" => {
+            build_sequence_node(builder, current, node_id, source, anchor_map)?
+        }
+        _ => {
+            // Scalar node
+            YamlNodeKind::Scalar(ScalarData {
+                exact_span: span_from_node(&current),
+                pretty_span: compute_pretty_span(&current),
+                kind: infer_scalar_kind(&current),
+            })
+        }
+    };
+
+    // Store node with parent link
+    builder.add_node(node_id, parent_id, kind);
+
+    Ok(node_id)
+}
+
+/// Build a mapping node from a tree-sitter block_mapping or flow_mapping.
+fn build_mapping_node(
+    builder: &mut CstBuilder,
+    node: Node,
+    parent_id: NodeId,  // This mapping's ID becomes parent for children
+    source: &str,
+    anchor_map: &AnchorMap,
+) -> Result<YamlNodeKind, QueryError> {
+    let mut entries = HashMap::new();
+
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        // Extract key from flow_pair, block_mapping_pair, or bare flow_node
+        let (key_node, value_node_opt, pair_span) = match child.kind() {
+            "flow_pair" | "block_mapping_pair" => {
+                let key = child
+                    .child_by_field_name("key")
+                    .ok_or_else(|| QueryError::MissingChildField(child.kind().into(), "key"))?;
+                let value = child.child_by_field_name("value");
+                (key, value, span_from_node(&child))
+            }
+            "flow_node" => {
+                // Bare key in flow mapping like { foo }
+                (child, None, span_from_node(&child))
+            }
+            _ => continue,
+        };
+
+        // Extract key string (handle quotes, anchors)
+        let key_str = extract_key_string(&key_node, source)?;
+
+        // Build value node with THIS node as parent
+        let value_id = if let Some(val_node) = value_node_opt {
+            Some(build_node(builder, val_node, Some(parent_id), source, anchor_map)?)
+        } else {
+            None
+        };
+
+        entries.insert(
+            key_str,
+            MappingEntry {
+                key_span: span_from_node(&key_node),
+                value_id,
+                pair_span,
+            },
+        );
+    }
+
+    Ok(YamlNodeKind::Mapping(MappingData {
+        entries,
+        exact_span: span_from_node(&node),
+    }))
+}
+
+/// Build a sequence node from a tree-sitter block_sequence or flow_sequence.
+fn build_sequence_node(
+    builder: &mut CstBuilder,
+    node: Node,
+    parent_id: NodeId,
+    source: &str,
+    anchor_map: &AnchorMap,
+) -> Result<YamlNodeKind, QueryError> {
+    let mut item_ids = Vec::new();
+
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        // Handle block_sequence_item wrappers
+        let content = if child.kind() == "block_sequence_item" {
+            child.named_child(0).unwrap_or(child)
+        } else {
+            child
+        };
+
+        let item_id = build_node(builder, content, Some(parent_id), source, anchor_map)?;
+        item_ids.push(item_id);
+    }
+
+    Ok(YamlNodeKind::Sequence(SequenceData {
+        item_ids,
+        exact_span: span_from_node(&node),
+    }))
+}
+
+/// Extract a key string from a key node, handling quotes and anchors.
+fn extract_key_string(node: &Node, source: &str) -> Result<Cow<'static, str>, QueryError> {
+    // Skip anchor nodes to get to the actual key
+    let mut cursor = node.walk();
+    let scalar = node
+        .named_children(&mut cursor)
+        .find(|n| n.kind() != "anchor")
+        .unwrap_or(*node);
+
+    let text = scalar
+        .utf8_text(source.as_bytes())
+        .map_err(|_| QueryError::Other("invalid UTF-8 in key".into()))?;
+
+    // Unquote if necessary
+    let unquoted = match scalar.kind() {
+        "single_quote_scalar" | "double_quote_scalar" => {
+            let mut chars = text.chars();
+            chars.next(); // Skip opening quote
+            chars.next_back(); // Skip closing quote
+            Cow::Owned(chars.as_str().to_string())
+        }
+        _ => Cow::Owned(text.to_string()), // TODO: Use Cow::Borrowed when possible
+    };
+
+    Ok(unquoted)
+}
+
+/// Create a SpanInfo from a tree-sitter node.
+fn span_from_node(node: &Node) -> SpanInfo {
+    SpanInfo {
+        byte_range: node.start_byte()..node.end_byte(),
+        point_range: node.start_position()..node.end_position(),
+    }
+}
+
+/// Compute the pretty span for a scalar (includes block scalar indicators).
+fn compute_pretty_span(node: &Node) -> Option<SpanInfo> {
+    // If this is a block scalar, include the indicator (|, >, |-, etc.)
+    if node.kind() == "block_scalar" {
+        Some(span_from_node(node))
+    } else {
+        None
+    }
+}
+
+/// Infer the scalar kind from a tree-sitter node.
+fn infer_scalar_kind(node: &Node) -> ScalarKind {
+    match node.kind() {
+        "single_quote_scalar" => ScalarKind::SingleQuote,
+        "double_quote_scalar" => ScalarKind::DoubleQuote,
+        "block_scalar" => ScalarKind::Block,
+        _ => ScalarKind::Plain,
+    }
+}
+
 /// Represents a queryable YAML document.
 #[derive(Clone)]
 pub struct Document {
+    /// The underlying tree-sitter parse tree and source.
+    /// Kept for comment extraction and span computation.
     tree: Tree,
+
+    /// The reduced CST storage (all nodes in a Vec).
+    cst: CstStore,
+
+    /// Line/column index for the source.
     line_index: LineIndex,
+
+    // NOTE: These field IDs are kept temporarily for backwards compatibility
+    // with the old query_node implementation. They will be removed once
+    // all query methods are migrated to use the CST.
     document_id: u16,
     block_node_id: u16,
     flow_node_id: u16,
-    // A "block" sequence, i.e. a YAML-style array (`- foo\n-bar`)
     block_sequence_id: u16,
-    // A "flow" sequence, i.e. a JSON-style array (`[foo, bar]`)
     flow_sequence_id: u16,
-    // A "block" mapping, i.e. a YAML-style map (`foo: bar`)
     block_mapping_id: u16,
-    // A "flow" mapping, i.e. a JSON-style map (`{foo: bar}`)
     flow_mapping_id: u16,
     block_mapping_pair_id: u16,
     flow_pair_id: u16,
@@ -444,8 +783,23 @@ impl Document {
             tree,
         };
 
+        let tree_struct = Tree::build(source_tree)?;
+
+        // Build the reduced CST with NodeId-based parent tracking
+        let mut builder = CstBuilder::new();
+        let root_node = tree_struct.borrow_owner().tree.root_node();
+        let root_id = build_node(
+            &mut builder,
+            root_node,
+            None,  // No parent for root
+            tree_struct.borrow_owner().source.as_str(),
+            tree_struct.borrow_dependent(),
+        )?;
+        let cst = builder.finish(root_id);
+
         Ok(Self {
-            tree: Tree::build(source_tree)?,
+            tree: tree_struct,
+            cst,
             line_index,
             document_id: language.id_for_node_kind("document", true),
             block_node_id: language.id_for_node_kind("block_node", true),
@@ -1145,7 +1499,7 @@ baz:
         let feature = doc.top_feature().unwrap();
 
         assert_eq!(doc.extract(&feature).trim(), doc.source().trim());
-        assert_eq!(feature.kind(), FeatureKind::BlockMapping);
+        assert_eq!(feature.kind(), FeatureKind::Mapping);
     }
 
     #[test]
@@ -1246,27 +1600,27 @@ nested:
         for (route, expected_kind) in &[
             (
                 vec![Component::Key("block-mapping".into())],
-                FeatureKind::BlockMapping,
+                FeatureKind::Mapping,
             ),
             (
                 vec![Component::Key("block-mapping-quoted".into())],
-                FeatureKind::BlockMapping,
+                FeatureKind::Mapping,
             ),
             (
                 vec![Component::Key("block-sequence".into())],
-                FeatureKind::BlockSequence,
+                FeatureKind::Sequence,
             ),
             (
                 vec![Component::Key("block-sequence-quoted".into())],
-                FeatureKind::BlockSequence,
+                FeatureKind::Sequence,
             ),
             (
                 vec![Component::Key("flow-mapping".into())],
-                FeatureKind::FlowMapping,
+                FeatureKind::Mapping,
             ),
             (
                 vec![Component::Key("flow-sequence".into())],
-                FeatureKind::FlowSequence,
+                FeatureKind::Sequence,
             ),
             (
                 vec![Component::Key("scalars".into()), Component::Index(0)],
@@ -1318,7 +1672,7 @@ nested:
                     Component::Key("foo".into()),
                     Component::Index(2),
                 ],
-                FeatureKind::FlowMapping,
+                FeatureKind::Mapping,
             ),
             (
                 vec![
@@ -1326,7 +1680,7 @@ nested:
                     Component::Key("foo".into()),
                     Component::Index(3),
                 ],
-                FeatureKind::FlowMapping,
+                FeatureKind::Mapping,
             ),
         ] {
             let route = Route::from(route.clone());
@@ -1413,7 +1767,7 @@ list:
         for (route, expected_kind, expected_value) in [
             (
                 route!("list", 0),
-                FeatureKind::BlockSequence,
+                FeatureKind::Sequence,
                 "- a\n  - b\n  - c",
             ),
             (route!("list", 1), FeatureKind::Scalar, "d"),
