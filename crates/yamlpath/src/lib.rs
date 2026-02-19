@@ -245,6 +245,11 @@ struct MappingData {
 
     /// The exact span of this mapping in the source.
     exact_span: SpanInfo,
+
+    /// Whether this mapping originated from a flow_mapping (`{ ... }`).
+    /// Used to determine "pretty" spans: flow mappings include the braces,
+    /// while block mappings use the pair span.
+    is_flow: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -739,6 +744,7 @@ fn build_mapping_node(
     Ok(YamlNodeKind::Mapping(MappingData {
         entries,
         exact_span: span_from_node(&node),
+        is_flow: node.kind() == "flow_mapping",
     }))
 }
 
@@ -769,6 +775,17 @@ fn build_sequence_node(
                 .unwrap_or(child)
         } else {
             child
+        };
+
+        // For flow_pairs in sequences (e.g., `[1, key: value]`), descend into
+        // the value to match the old tree-sitter behavior where flow_pairs
+        // were transparent during sequence indexing.
+        let content = if content.kind() == "flow_pair" {
+            content
+                .child_by_field_name("value")
+                .unwrap_or(content)
+        } else {
+            content
         };
 
         let item_id = build_node(builder, content, Some(parent_id), source, anchor_map)?;
@@ -1056,12 +1073,24 @@ impl Document {
     /// `foo: bar` instead of just `bar`.
     pub fn query_pretty(&self, route: &Route) -> Result<Feature<'_>, QueryError> {
         match self.query_cst(route)? {
-            QueryResult::MappingKey { parent_id, entry } => Ok(Feature {
-                node_id: entry.value_id,
-                doc: self,
-                location: Location::from_span(&entry.pair_span, &self.line_index),
-                context: Some(self.compute_location_for_node(parent_id, QueryMode::Exact)),
-            }),
+            QueryResult::MappingKey { parent_id, entry } => {
+                // For flow mappings (`{ key: value }`), the "pretty" span
+                // includes the surrounding braces (the entire flow_mapping),
+                // matching the old tree-sitter behavior of walking up from
+                // flow_pair to its parent flow_mapping.
+                let parent_node = &self.cst.nodes[parent_id.0];
+                let location_span = match &parent_node.kind {
+                    YamlNodeKind::Mapping(map) if map.is_flow => &map.exact_span,
+                    _ => &entry.pair_span,
+                };
+
+                Ok(Feature {
+                    node_id: entry.value_id,
+                    doc: self,
+                    location: Location::from_span(location_span, &self.line_index),
+                    context: Some(self.compute_location_for_node(parent_id, QueryMode::Exact)),
+                })
+            }
             QueryResult::Node(node_id) => Ok(self.create_feature(node_id, QueryMode::Pretty)),
         }
     }
