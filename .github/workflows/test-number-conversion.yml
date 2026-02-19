@@ -1,0 +1,732 @@
+name: Test Number Conversion Edge Cases
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [dm/test-workflow]
+
+jobs:
+  # Test 1: Whitespace handling
+  test-whitespace:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Should pass - whitespace trimmed
+        if: ${{ '   123   ' == 123 }}
+        run: echo "PASS_1=true" >> $GITHUB_ENV
+
+      - name: Should NOT run - whitespace as different number
+        if: ${{ '   123   ' == 456 }}
+        run: exit 1
+
+      - name: Should pass - whitespace-only equals zero
+        if: ${{ '    ' == 0 }}
+        run: echo "PASS_2=true" >> $GITHUB_ENV
+
+      - name: Should pass - mixed whitespace with tabs
+        if: ${{ '  	123	  ' == 123 }}
+        run: echo "PASS_3=true" >> $GITHUB_ENV
+
+      - name: tab-only string equals zero
+        if: ${{ '	' == 0 }}
+        run: echo "PASS_4=true" >> $GITHUB_ENV
+
+      - name: newline-only string equals zero
+        run: |
+          # Can't embed raw newline in expression literal easily,
+          # so we test via env var
+          echo "NL_VAR=$(printf '\n')" >> $GITHUB_ENV
+
+      - name: Verify all expected tests passed
+        run: |
+          [[ "$PASS_1" == "true" ]] || { echo "FAIL: whitespace trim"; exit 1; }
+          [[ "$PASS_2" == "true" ]] || { echo "FAIL: whitespace-only as zero"; exit 1; }
+          [[ "$PASS_3" == "true" ]] || { echo "FAIL: mixed whitespace"; exit 1; }
+          [[ "$PASS_4" == "true" ]] || { echo "FAIL: tab-only as zero"; exit 1; }
+          echo "All whitespace tests passed"
+
+  # Test 2: Hex numbers
+  test-hex:
+    runs-on: ubuntu-latest
+    steps:
+      - name: hex lowercase
+        if: ${{ '0xff' == 255 }}
+        run: echo "PASS_1=true" >> $GITHUB_ENV
+
+      - name: Should NOT run - wrong hex value
+        if: ${{ '0xff' == 100 }}
+        run: exit 1
+
+      - name: hex uppercase prefix 0XFF
+        if: ${{ '0XFF' == 255 }}
+        run: echo "PASS_2=true" >> $GITHUB_ENV
+
+      - name: hex with whitespace
+        if: ${{ '  0xff  ' == 255 }}
+        run: echo "PASS_3=true" >> $GITHUB_ENV
+
+      - name: hex 0x0
+        if: ${{ '0x0' == 0 }}
+        run: echo "PASS_4=true" >> $GITHUB_ENV
+
+      - name: hex 0x11
+        if: ${{ '0x11' == 17 }}
+        run: echo "PASS_5=true" >> $GITHUB_ENV
+
+      - name: hex mixed case digits 0xfF
+        if: ${{ '0xfF' == 255 }}
+        run: echo "PASS_6=true" >> $GITHUB_ENV
+
+      - name: Verify
+        run: |
+          [[ "$PASS_1" == "true" ]] || { echo "FAIL: hex lowercase"; exit 1; }
+          echo "hex lowercase: PASS"
+          [[ "$PASS_2" == "true" ]] && echo "hex uppercase 0X: PASS (SUPPORTED)" || echo "hex uppercase 0X: FAIL (NOT SUPPORTED)"
+          [[ "$PASS_3" == "true" ]] || { echo "FAIL: hex whitespace"; exit 1; }
+          echo "hex whitespace: PASS"
+          [[ "$PASS_4" == "true" ]] || { echo "FAIL: hex 0x0"; exit 1; }
+          echo "hex 0x0: PASS"
+          [[ "$PASS_5" == "true" ]] || { echo "FAIL: hex 0x11"; exit 1; }
+          echo "hex 0x11: PASS"
+          [[ "$PASS_6" == "true" ]] || { echo "FAIL: hex mixed case"; exit 1; }
+          echo "hex mixed case: PASS"
+
+  # Test 3: Octal numbers
+  test-octal:
+    runs-on: ubuntu-latest
+    steps:
+      - name: octal lowercase
+        if: ${{ '0o10' == 8 }}
+        run: echo "PASS_1=true" >> $GITHUB_ENV
+
+      - name: Should NOT run - wrong octal value
+        if: ${{ '0o10' == 10 }}
+        run: exit 1
+
+      - name: octal uppercase 0O10
+        if: ${{ '0O10' == 8 }}
+        run: echo "PASS_2=true" >> $GITHUB_ENV
+
+      - name: octal with whitespace
+        if: ${{ '  0o10  ' == 8 }}
+        run: echo "PASS_3=true" >> $GITHUB_ENV
+
+      - name: octal 0o0
+        if: ${{ '0o0' == 0 }}
+        run: echo "PASS_4=true" >> $GITHUB_ENV
+
+      - name: octal 0o11
+        if: ${{ '0o11' == 9 }}
+        run: echo "PASS_5=true" >> $GITHUB_ENV
+
+      - name: Verify
+        run: |
+          [[ "$PASS_1" == "true" ]] || { echo "FAIL: octal lowercase"; exit 1; }
+          echo "octal lowercase: PASS"
+          [[ "$PASS_2" == "true" ]] && echo "octal uppercase 0O: PASS (SUPPORTED)" || echo "octal uppercase 0O: FAIL (NOT SUPPORTED)"
+          [[ "$PASS_3" == "true" ]] || { echo "FAIL: octal whitespace"; exit 1; }
+          echo "octal whitespace: PASS"
+          [[ "$PASS_4" == "true" ]] || { echo "FAIL: octal 0o0"; exit 1; }
+          echo "octal 0o0: PASS"
+          [[ "$PASS_5" == "true" ]] || { echo "FAIL: octal 0o11"; exit 1; }
+          echo "octal 0o11: PASS"
+
+  # Test 4: Scientific notation
+  test-scientific:
+    runs-on: ubuntu-latest
+    steps:
+      - name: scientific lowercase e
+        if: ${{ '1.2e2' == 120 }}
+        run: echo "PASS_1=true" >> $GITHUB_ENV
+
+      - name: scientific uppercase E
+        if: ${{ '1.2E2' == 120 }}
+        run: echo "PASS_2=true" >> $GITHUB_ENV
+
+      - name: negative exponent
+        if: ${{ '1.2e-2' == 0.012 }}
+        run: echo "PASS_3=true" >> $GITHUB_ENV
+
+      - name: scientific with whitespace
+        if: ${{ '  1.2e2  ' == 120 }}
+        run: echo "PASS_4=true" >> $GITHUB_ENV
+
+      - name: positive exponent with +
+        if: ${{ '1.2e+2' == 120 }}
+        run: echo "PASS_5=true" >> $GITHUB_ENV
+
+      - name: integer with exponent
+        if: ${{ '5e0' == 5 }}
+        run: echo "PASS_6=true" >> $GITHUB_ENV
+
+      - name: 1e3
+        if: ${{ '1e3' == 1000 }}
+        run: echo "PASS_7=true" >> $GITHUB_ENV
+
+      - name: 123e-1
+        if: ${{ '123e-1' == 12.3 }}
+        run: echo "PASS_8=true" >> $GITHUB_ENV
+
+      - name: Verify
+        run: |
+          [[ "$PASS_1" == "true" ]] || { echo "FAIL: sci lowercase"; exit 1; }
+          [[ "$PASS_2" == "true" ]] || { echo "FAIL: sci uppercase"; exit 1; }
+          [[ "$PASS_3" == "true" ]] || { echo "FAIL: sci neg exp"; exit 1; }
+          [[ "$PASS_4" == "true" ]] || { echo "FAIL: sci whitespace"; exit 1; }
+          [[ "$PASS_5" == "true" ]] || { echo "FAIL: sci pos exp +"; exit 1; }
+          [[ "$PASS_6" == "true" ]] || { echo "FAIL: 5e0"; exit 1; }
+          [[ "$PASS_7" == "true" ]] || { echo "FAIL: 1e3"; exit 1; }
+          [[ "$PASS_8" == "true" ]] || { echo "FAIL: 123e-1"; exit 1; }
+          echo "All scientific notation tests passed"
+
+  # Test 5: Binary numbers
+  test-binary:
+    runs-on: ubuntu-latest
+    steps:
+      - name: binary lowercase 0b1010
+        if: ${{ '0b1010' == 10 }}
+        run: echo "PASS_1=true" >> $GITHUB_ENV
+
+      - name: binary uppercase 0B1010
+        if: ${{ '0B1010' == 10 }}
+        run: echo "PASS_2=true" >> $GITHUB_ENV
+
+      - name: binary 0b0
+        if: ${{ '0b0' == 0 }}
+        run: echo "PASS_3=true" >> $GITHUB_ENV
+
+      - name: binary 0b1
+        if: ${{ '0b1' == 1 }}
+        run: echo "PASS_4=true" >> $GITHUB_ENV
+
+      - name: binary 0b11
+        if: ${{ '0b11' == 3 }}
+        run: echo "PASS_5=true" >> $GITHUB_ENV
+
+      - name: binary with whitespace
+        if: ${{ ' 0b11 ' == 3 }}
+        run: echo "PASS_6=true" >> $GITHUB_ENV
+
+      - name: Verify (binary may not be supported)
+        run: |
+          echo "=== Binary notation support ==="
+          [[ "$PASS_1" == "true" ]] && echo "0b1010==10: PASS" || echo "0b1010==10: FAIL"
+          [[ "$PASS_2" == "true" ]] && echo "0B1010==10: PASS" || echo "0B1010==10: FAIL"
+          [[ "$PASS_3" == "true" ]] && echo "0b0==0: PASS" || echo "0b0==0: FAIL"
+          [[ "$PASS_4" == "true" ]] && echo "0b1==1: PASS" || echo "0b1==1: FAIL"
+          [[ "$PASS_5" == "true" ]] && echo "0b11==3: PASS" || echo "0b11==3: FAIL"
+          [[ "$PASS_6" == "true" ]] && echo "' 0b11 '==3: PASS" || echo "' 0b11 '==3: FAIL"
+
+  # Test 6: Comparison operators with coercion
+  test-comparisons:
+    runs-on: ubuntu-latest
+    steps:
+      - name: greater than with whitespace
+        if: ${{ '  200  ' > 100 }}
+        run: echo "PASS_1=true" >> $GITHUB_ENV
+
+      - name: Should NOT run - false comparison
+        if: ${{ '  50  ' > 100 }}
+        run: exit 1
+
+      - name: less than with hex
+        if: ${{ '0x10' < 100 }}
+        run: echo "PASS_2=true" >> $GITHUB_ENV
+
+      - name: greater than with scientific
+        if: ${{ '1e3' > 100 }}
+        run: echo "PASS_3=true" >> $GITHUB_ENV
+
+      - name: less than or equal
+        if: ${{ '  123  ' <= 123 }}
+        run: echo "PASS_4=true" >> $GITHUB_ENV
+
+      - name: greater than or equal
+        if: ${{ '  123  ' >= 123 }}
+        run: echo "PASS_5=true" >> $GITHUB_ENV
+
+      - name: Verify
+        run: |
+          [[ "$PASS_1" == "true" ]] || { echo "FAIL: gt"; exit 1; }
+          [[ "$PASS_2" == "true" ]] || { echo "FAIL: lt hex"; exit 1; }
+          [[ "$PASS_3" == "true" ]] || { echo "FAIL: gt sci"; exit 1; }
+          [[ "$PASS_4" == "true" ]] || { echo "FAIL: lte"; exit 1; }
+          [[ "$PASS_5" == "true" ]] || { echo "FAIL: gte"; exit 1; }
+          echo "All comparison tests passed"
+
+  # Test 7: Signs and edge cases
+  test-edge-cases:
+    runs-on: ubuntu-latest
+    steps:
+      - name: negative with whitespace
+        if: ${{ '  -42  ' == -42 }}
+        run: echo "PASS_1=true" >> $GITHUB_ENV
+
+      - name: decimal with whitespace
+        if: ${{ '  3.14  ' == 3.14 }}
+        run: echo "PASS_2=true" >> $GITHUB_ENV
+
+      - name: plus sign
+        if: ${{ '+42' == 42 }}
+        run: echo "PASS_3=true" >> $GITHUB_ENV
+
+      - name: Infinity gt large number
+        if: ${{ 'Infinity' > 1000000 }}
+        run: echo "PASS_4=true" >> $GITHUB_ENV
+
+      - name: -Infinity lt large negative
+        if: ${{ '-Infinity' < -1000000 }}
+        run: echo "PASS_5=true" >> $GITHUB_ENV
+
+      - name: +0 equals 0
+        if: ${{ '+0' == 0 }}
+        run: echo "PASS_6=true" >> $GITHUB_ENV
+
+      - name: -0 equals 0
+        if: ${{ '-0' == 0 }}
+        run: echo "PASS_7=true" >> $GITHUB_ENV
+
+      - name: +Infinity
+        if: ${{ '+Infinity' > 1000000 }}
+        run: echo "PASS_8=true" >> $GITHUB_ENV
+
+      - name: empty string equals 0
+        if: ${{ '' == 0 }}
+        run: echo "PASS_9=true" >> $GITHUB_ENV
+
+      - name: Verify
+        run: |
+          [[ "$PASS_1" == "true" ]] || { echo "FAIL: negative"; exit 1; }
+          [[ "$PASS_2" == "true" ]] || { echo "FAIL: decimal"; exit 1; }
+          [[ "$PASS_3" == "true" ]] || { echo "FAIL: plus sign"; exit 1; }
+          [[ "$PASS_4" == "true" ]] || { echo "FAIL: Infinity"; exit 1; }
+          [[ "$PASS_5" == "true" ]] || { echo "FAIL: -Infinity"; exit 1; }
+          [[ "$PASS_6" == "true" ]] || { echo "FAIL: +0"; exit 1; }
+          [[ "$PASS_7" == "true" ]] || { echo "FAIL: -0"; exit 1; }
+          [[ "$PASS_8" == "true" ]] && echo "+Infinity: PASS (SUPPORTED)" || echo "+Infinity: FAIL (NOT SUPPORTED)"
+          [[ "$PASS_9" == "true" ]] || { echo "FAIL: empty string"; exit 1; }
+          echo "Edge case tests done"
+
+  # Test 8: Invalid strings (should NOT equal numbers)
+  test-invalid:
+    runs-on: ubuntu-latest
+    steps:
+      - name: invalid string not equal to number
+        if: ${{ 'abc' != 123 }}
+        run: echo "PASS_1=true" >> $GITHUB_ENV
+
+      - name: Should NOT run - invalid equals number
+        if: ${{ 'abc' == 123 }}
+        run: exit 1
+
+      - name: partially valid not equal
+        if: ${{ '123abc' != 123 }}
+        run: echo "PASS_2=true" >> $GITHUB_ENV
+
+      - name: trailing text not equal
+        if: ${{ 'abc123' != 123 }}
+        run: echo "PASS_3=true" >> $GITHUB_ENV
+
+      - name: Verify
+        run: |
+          [[ "$PASS_1" == "true" ]] || { echo "FAIL: invalid string"; exit 1; }
+          [[ "$PASS_2" == "true" ]] || { echo "FAIL: partially valid"; exit 1; }
+          [[ "$PASS_3" == "true" ]] || { echo "FAIL: trailing text"; exit 1; }
+          echo "All invalid string tests passed"
+
+  # Test 9: Leading zeros - should these be treated as octal or decimal?
+  test-leading-zeros:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 0123 equals 123 (decimal, not octal)
+        if: ${{ '0123' == 123 }}
+        run: echo "DECIMAL=true" >> $GITHUB_ENV
+
+      - name: 0123 equals 83 (octal interpretation)
+        if: ${{ '0123' == 83 }}
+        run: echo "OCTAL=true" >> $GITHUB_ENV
+
+      - name: 00 equals 0
+        if: ${{ '00' == 0 }}
+        run: echo "PASS_1=true" >> $GITHUB_ENV
+
+      - name: 007 equals 7
+        if: ${{ '007' == 7 }}
+        run: echo "PASS_2=true" >> $GITHUB_ENV
+
+      - name: 010 equals 10 (decimal)
+        if: ${{ '010' == 10 }}
+        run: echo "DECIMAL_010=true" >> $GITHUB_ENV
+
+      - name: 010 equals 8 (octal)
+        if: ${{ '010' == 8 }}
+        run: echo "OCTAL_010=true" >> $GITHUB_ENV
+
+      - name: Verify
+        run: |
+          echo "=== Leading zeros behavior ==="
+          [[ "$DECIMAL" == "true" ]] && echo "0123 == 123 (decimal): PASS" || echo "0123 == 123 (decimal): FAIL"
+          [[ "$OCTAL" == "true" ]] && echo "0123 == 83 (octal): PASS" || echo "0123 == 83 (octal): FAIL"
+          [[ "$PASS_1" == "true" ]] && echo "00 == 0: PASS" || echo "00 == 0: FAIL"
+          [[ "$PASS_2" == "true" ]] && echo "007 == 7: PASS" || echo "007 == 7: FAIL"
+          [[ "$DECIMAL_010" == "true" ]] && echo "010 == 10 (decimal): PASS" || echo "010 == 10 (decimal): FAIL"
+          [[ "$OCTAL_010" == "true" ]] && echo "010 == 8 (octal): PASS" || echo "010 == 8 (octal): FAIL"
+
+  # Test 10: Signed hex/octal/binary - are these supported?
+  test-signed-prefixed:
+    runs-on: ubuntu-latest
+    steps:
+      - name: negative hex -0xff
+        if: ${{ '-0xff' == -255 }}
+        run: echo "NEG_HEX=true" >> $GITHUB_ENV
+
+      - name: positive hex +0xff
+        if: ${{ '+0xff' == 255 }}
+        run: echo "POS_HEX=true" >> $GITHUB_ENV
+
+      - name: negative octal -0o10
+        if: ${{ '-0o10' == -8 }}
+        run: echo "NEG_OCT=true" >> $GITHUB_ENV
+
+      - name: positive octal +0o10
+        if: ${{ '+0o10' == 8 }}
+        run: echo "POS_OCT=true" >> $GITHUB_ENV
+
+      - name: negative binary -0b11
+        if: ${{ '-0b11' == -3 }}
+        run: echo "NEG_BIN=true" >> $GITHUB_ENV
+
+      - name: Verify
+        run: |
+          echo "=== Signed prefix behavior ==="
+          [[ "$NEG_HEX" == "true" ]] && echo "-0xff == -255: PASS (SUPPORTED)" || echo "-0xff == -255: FAIL (NaN)"
+          [[ "$POS_HEX" == "true" ]] && echo "+0xff == 255: PASS (SUPPORTED)" || echo "+0xff == 255: FAIL (NaN)"
+          [[ "$NEG_OCT" == "true" ]] && echo "-0o10 == -8: PASS (SUPPORTED)" || echo "-0o10 == -8: FAIL (NaN)"
+          [[ "$POS_OCT" == "true" ]] && echo "+0o10 == 8: PASS (SUPPORTED)" || echo "+0o10 == 8: FAIL (NaN)"
+          [[ "$NEG_BIN" == "true" ]] && echo "-0b11 == -3: PASS (SUPPORTED)" || echo "-0b11 == -3: FAIL (NaN)"
+
+  # Test 11: Empty prefixes and invalid digits for base
+  test-invalid-prefixed:
+    runs-on: ubuntu-latest
+    steps:
+      # Empty prefix (no digits) - should be NaN, so != any number
+      - name: empty hex 0x is NaN
+        if: ${{ '0x' != 0 }}
+        run: echo "PASS_1=true" >> $GITHUB_ENV
+
+      - name: empty octal 0o is NaN
+        if: ${{ '0o' != 0 }}
+        run: echo "PASS_2=true" >> $GITHUB_ENV
+
+      - name: empty binary 0b is NaN
+        if: ${{ '0b' != 0 }}
+        run: echo "PASS_3=true" >> $GITHUB_ENV
+
+      # Invalid digits for the base
+      - name: invalid hex 0xZZ is NaN
+        if: ${{ '0xZZ' != 0 }}
+        run: echo "PASS_4=true" >> $GITHUB_ENV
+
+      - name: invalid octal 0o89 is NaN
+        if: ${{ '0o89' != 0 }}
+        run: echo "PASS_5=true" >> $GITHUB_ENV
+
+      - name: invalid binary 0b23 is NaN
+        if: ${{ '0b23' != 0 }}
+        run: echo "PASS_6=true" >> $GITHUB_ENV
+
+      - name: Verify
+        run: |
+          echo "=== Empty/invalid prefix behavior ==="
+          [[ "$PASS_1" == "true" ]] && echo "0x != 0 (NaN): PASS" || echo "0x != 0: FAIL (treated as 0?)"
+          [[ "$PASS_2" == "true" ]] && echo "0o != 0 (NaN): PASS" || echo "0o != 0: FAIL (treated as 0?)"
+          [[ "$PASS_3" == "true" ]] && echo "0b != 0 (NaN): PASS" || echo "0b != 0: FAIL (treated as 0?)"
+          [[ "$PASS_4" == "true" ]] && echo "0xZZ != 0 (NaN): PASS" || echo "0xZZ != 0: FAIL"
+          [[ "$PASS_5" == "true" ]] && echo "0o89 != 0 (NaN): PASS" || echo "0o89 != 0: FAIL"
+          [[ "$PASS_6" == "true" ]] && echo "0b23 != 0 (NaN): PASS" || echo "0b23 != 0: FAIL"
+
+  # Test 12: Partial numerics, embedded whitespace, separators
+  test-malformed-strings:
+    runs-on: ubuntu-latest
+    steps:
+      - name: partial numeric 100a is NaN
+        if: ${{ '100a' != 100 }}
+        run: echo "PASS_1=true" >> $GITHUB_ENV
+
+      - name: multiple dots 12.3.4 is NaN
+        if: ${{ '12.3.4' != 12.3 }}
+        run: echo "PASS_2=true" >> $GITHUB_ENV
+
+      - name: double exponent 1e2e3 is NaN
+        if: ${{ '1e2e3' != 100 }}
+        run: echo "PASS_3=true" >> $GITHUB_ENV
+
+      - name: embedded whitespace 1 2 is NaN
+        if: ${{ '1 2' != 12 }}
+        run: echo "PASS_4=true" >> $GITHUB_ENV
+
+      - name: numeric separator 1_000 is NaN
+        if: ${{ '1_000' != 1000 }}
+        run: echo "PASS_5=true" >> $GITHUB_ENV
+
+      - name: bare plus is NaN
+        if: ${{ '+' != 0 }}
+        run: echo "PASS_6=true" >> $GITHUB_ENV
+
+      - name: bare minus is NaN
+        if: ${{ '-' != 0 }}
+        run: echo "PASS_7=true" >> $GITHUB_ENV
+
+      - name: dot only is NaN
+        if: ${{ '.' != 0 }}
+        run: echo "PASS_8=true" >> $GITHUB_ENV
+
+      - name: trailing dot 123. equals 123
+        if: ${{ '123.' == 123 }}
+        run: echo "TRAILING_DOT=true" >> $GITHUB_ENV
+
+      - name: leading dot .5 equals 0.5
+        if: ${{ '.5' == 0.5 }}
+        run: echo "LEADING_DOT=true" >> $GITHUB_ENV
+
+      - name: Verify
+        run: |
+          echo "=== Malformed string behavior ==="
+          [[ "$PASS_1" == "true" ]] && echo "100a NaN: PASS" || echo "100a NaN: FAIL"
+          [[ "$PASS_2" == "true" ]] && echo "12.3.4 NaN: PASS" || echo "12.3.4 NaN: FAIL"
+          [[ "$PASS_3" == "true" ]] && echo "1e2e3 NaN: PASS" || echo "1e2e3 NaN: FAIL"
+          [[ "$PASS_4" == "true" ]] && echo "'1 2' NaN: PASS" || echo "'1 2' NaN: FAIL"
+          [[ "$PASS_5" == "true" ]] && echo "1_000 NaN: PASS" || echo "1_000 NaN: FAIL"
+          [[ "$PASS_6" == "true" ]] && echo "'+' NaN: PASS" || echo "'+' NaN: FAIL"
+          [[ "$PASS_7" == "true" ]] && echo "'-' NaN: PASS" || echo "'-' NaN: FAIL"
+          [[ "$PASS_8" == "true" ]] && echo "'.' NaN: PASS" || echo "'.' NaN: FAIL"
+          [[ "$TRAILING_DOT" == "true" ]] && echo "'123.' == 123: PASS (SUPPORTED)" || echo "'123.' == 123: FAIL (NaN)"
+          [[ "$LEADING_DOT" == "true" ]] && echo "'.5' == 0.5: PASS (SUPPORTED)" || echo "'.5' == 0.5: FAIL (NaN)"
+
+  # Test 13: NaN comparison semantics
+  test-nan-semantics:
+    runs-on: ubuntu-latest
+    steps:
+      - name: NaN != NaN
+        if: ${{ ' NaN ' != ' NaN ' }}
+        run: echo "PASS_1=true" >> $GITHUB_ENV
+
+      - name: NaN not equal to self (==)
+        if: ${{ ' NaN ' == ' NaN ' }}
+        run: echo "NAN_EQ=true" >> $GITHUB_ENV
+
+      - name: NaN not greater than NaN
+        if: ${{ ' NaN ' > ' NaN ' }}
+        run: echo "NAN_GT=true" >> $GITHUB_ENV
+
+      - name: NaN not less than NaN
+        if: ${{ ' NaN ' < ' NaN ' }}
+        run: echo "NAN_LT=true" >> $GITHUB_ENV
+
+      - name: invalid string NaN != invalid string NaN
+        if: ${{ 'abc' != 'def' }}
+        run: echo "PASS_5=true" >> $GITHUB_ENV
+
+      - name: NaN != 0
+        if: ${{ 'abc' != 0 }}
+        run: echo "PASS_6=true" >> $GITHUB_ENV
+
+      - name: NaN != 1
+        if: ${{ 'abc' != 1 }}
+        run: echo "PASS_7=true" >> $GITHUB_ENV
+
+      - name: Verify
+        run: |
+          echo "=== NaN semantics ==="
+          [[ "$PASS_1" == "true" ]] && echo "NaN != NaN: true (CORRECT)" || echo "NaN != NaN: false (WRONG)"
+          [[ "$NAN_EQ" == "true" ]] && echo "NaN == NaN: true (WRONG)" || echo "NaN == NaN: false (CORRECT)"
+          [[ "$NAN_GT" == "true" ]] && echo "NaN > NaN: true (WRONG)" || echo "NaN > NaN: false (CORRECT)"
+          [[ "$NAN_LT" == "true" ]] && echo "NaN < NaN: true (WRONG)" || echo "NaN < NaN: false (CORRECT)"
+          [[ "$PASS_5" == "true" ]] && echo "'abc' != 'def': true" || echo "'abc' != 'def': false"
+          [[ "$PASS_6" == "true" ]] && echo "NaN != 0: true (CORRECT)" || echo "NaN != 0: false (WRONG)"
+          [[ "$PASS_7" == "true" ]] && echo "NaN != 1: true (CORRECT)" || echo "NaN != 1: false (WRONG)"
+
+  # Test 14: Boolean and null coercion
+  test-bool-null:
+    runs-on: ubuntu-latest
+    steps:
+      - name: null == 0
+        if: ${{ null == 0 }}
+        run: echo "PASS_1=true" >> $GITHUB_ENV
+
+      - name: true == 1
+        if: ${{ true == 1 }}
+        run: echo "PASS_2=true" >> $GITHUB_ENV
+
+      - name: false == 0
+        if: ${{ false == 0 }}
+        run: echo "PASS_3=true" >> $GITHUB_ENV
+
+      - name: true != 2
+        if: ${{ true != 2 }}
+        run: echo "PASS_4=true" >> $GITHUB_ENV
+
+      - name: null != 1
+        if: ${{ null != 1 }}
+        run: echo "PASS_5=true" >> $GITHUB_ENV
+
+      - name: true > 0
+        if: ${{ true > 0 }}
+        run: echo "PASS_6=true" >> $GITHUB_ENV
+
+      - name: false < 1
+        if: ${{ false < 1 }}
+        run: echo "PASS_7=true" >> $GITHUB_ENV
+
+      - name: null < 1
+        if: ${{ null < 1 }}
+        run: echo "PASS_8=true" >> $GITHUB_ENV
+
+      - name: Verify
+        run: |
+          [[ "$PASS_1" == "true" ]] || { echo "FAIL: null==0"; exit 1; }
+          [[ "$PASS_2" == "true" ]] || { echo "FAIL: true==1"; exit 1; }
+          [[ "$PASS_3" == "true" ]] || { echo "FAIL: false==0"; exit 1; }
+          [[ "$PASS_4" == "true" ]] || { echo "FAIL: true!=2"; exit 1; }
+          [[ "$PASS_5" == "true" ]] || { echo "FAIL: null!=1"; exit 1; }
+          [[ "$PASS_6" == "true" ]] || { echo "FAIL: true>0"; exit 1; }
+          [[ "$PASS_7" == "true" ]] || { echo "FAIL: false<1"; exit 1; }
+          [[ "$PASS_8" == "true" ]] || { echo "FAIL: null<1"; exit 1; }
+          echo "All boolean/null coercion tests passed"
+
+  # Test 15: Array/Object to number coercion
+  test-array-object:
+    runs-on: ubuntu-latest
+    steps:
+      - name: empty array != 0 (NaN)
+        if: ${{ fromjson('[]') != 0 }}
+        run: echo "PASS_1=true" >> $GITHUB_ENV
+
+      - name: empty array == NaN
+        if: ${{ fromjson('[]') == fromjson('[]') }}
+        run: echo "ARR_EQ=true" >> $GITHUB_ENV
+
+      - name: empty object != 0 (NaN)
+        if: ${{ fromjson('{}') != 0 }}
+        run: echo "PASS_3=true" >> $GITHUB_ENV
+
+      - name: non-empty array != 0
+        if: ${{ fromjson('[1,2,3]') != 0 }}
+        run: echo "PASS_4=true" >> $GITHUB_ENV
+
+      - name: Verify
+        run: |
+          echo "=== Array/Object coercion ==="
+          [[ "$PASS_1" == "true" ]] && echo "[] != 0 (NaN): PASS" || echo "[] != 0: FAIL"
+          [[ "$ARR_EQ" == "true" ]] && echo "[] == []: PASS (compared as same type?)" || echo "[] == []: FAIL (both NaN, NaN!=NaN)"
+          [[ "$PASS_3" == "true" ]] && echo "{} != 0 (NaN): PASS" || echo "{} != 0: FAIL"
+          [[ "$PASS_4" == "true" ]] && echo "[1,2,3] != 0 (NaN): PASS" || echo "[1,2,3] != 0: FAIL"
+
+  # Test 16: Env vars with edge-case formatting
+  test-env-vars:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Set variables with weird formatting
+        run: |
+          echo "VAR_WHITESPACE=   123   " >> $GITHUB_ENV
+          echo "VAR_HEX=0xff" >> $GITHUB_ENV
+          echo "VAR_SCI=1.2e2" >> $GITHUB_ENV
+          echo "VAR_OCTAL=0o10" >> $GITHUB_ENV
+          echo "VAR_EMPTY=" >> $GITHUB_ENV
+
+      - name: whitespace var
+        if: ${{ env.VAR_WHITESPACE == 123 }}
+        run: echo "PASS_1=true" >> $GITHUB_ENV
+
+      - name: hex var
+        if: ${{ env.VAR_HEX == 255 }}
+        run: echo "PASS_2=true" >> $GITHUB_ENV
+
+      - name: scientific var
+        if: ${{ env.VAR_SCI == 120 }}
+        run: echo "PASS_3=true" >> $GITHUB_ENV
+
+      - name: octal var
+        if: ${{ env.VAR_OCTAL == 8 }}
+        run: echo "PASS_4=true" >> $GITHUB_ENV
+
+      - name: empty var equals 0
+        if: ${{ env.VAR_EMPTY == 0 }}
+        run: echo "PASS_5=true" >> $GITHUB_ENV
+
+      - name: Verify
+        run: |
+          [[ "$PASS_1" == "true" ]] || { echo "FAIL: whitespace var"; exit 1; }
+          [[ "$PASS_2" == "true" ]] || { echo "FAIL: hex var"; exit 1; }
+          [[ "$PASS_3" == "true" ]] || { echo "FAIL: sci var"; exit 1; }
+          [[ "$PASS_4" == "true" ]] || { echo "FAIL: octal var"; exit 1; }
+          [[ "$PASS_5" == "true" ]] && echo "empty var == 0: PASS" || echo "empty var == 0: FAIL"
+          echo "Env var tests done"
+
+  # Test 17: Combined / AND / OR
+  test-combined:
+    runs-on: ubuntu-latest
+    steps:
+      - name: AND with formatted numbers
+        if: ${{ '  100  ' > 50 && '0xff' == 255 }}
+        run: echo "PASS_1=true" >> $GITHUB_ENV
+
+      - name: OR with one valid
+        if: ${{ 'abc' == 123 || '  100  ' == 100 }}
+        run: echo "PASS_2=true" >> $GITHUB_ENV
+
+      - name: Should NOT run - both false
+        if: ${{ 'abc' == 123 || '  100  ' == 200 }}
+        run: exit 1
+
+      - name: Verify
+        run: |
+          [[ "$PASS_1" == "true" ]] || { echo "FAIL: AND"; exit 1; }
+          [[ "$PASS_2" == "true" ]] || { echo "FAIL: OR"; exit 1; }
+          echo "All combined tests passed"
+
+  # Summary
+  summary:
+    runs-on: ubuntu-latest
+    needs:
+      - test-whitespace
+      - test-hex
+      - test-octal
+      - test-scientific
+      - test-binary
+      - test-comparisons
+      - test-edge-cases
+      - test-invalid
+      - test-leading-zeros
+      - test-signed-prefixed
+      - test-invalid-prefixed
+      - test-malformed-strings
+      - test-nan-semantics
+      - test-bool-null
+      - test-array-object
+      - test-env-vars
+      - test-combined
+    if: always()
+    steps:
+      - name: Report results
+        run: |
+          echo "=== GitHub Actions Number Conversion Test Results ==="
+          echo ""
+          echo "Whitespace:       ${{ needs.test-whitespace.result }}"
+          echo "Hex:              ${{ needs.test-hex.result }}"
+          echo "Octal:            ${{ needs.test-octal.result }}"
+          echo "Scientific:       ${{ needs.test-scientific.result }}"
+          echo "Binary:           ${{ needs.test-binary.result }}"
+          echo "Comparisons:      ${{ needs.test-comparisons.result }}"
+          echo "Edge cases:       ${{ needs.test-edge-cases.result }}"
+          echo "Invalid:          ${{ needs.test-invalid.result }}"
+          echo "Leading zeros:    ${{ needs.test-leading-zeros.result }}"
+          echo "Signed prefixed:  ${{ needs.test-signed-prefixed.result }}"
+          echo "Invalid prefixed: ${{ needs.test-invalid-prefixed.result }}"
+          echo "Malformed:        ${{ needs.test-malformed-strings.result }}"
+          echo "NaN semantics:    ${{ needs.test-nan-semantics.result }}"
+          echo "Bool/Null:        ${{ needs.test-bool-null.result }}"
+          echo "Array/Object:     ${{ needs.test-array-object.result }}"
+          echo "Env vars:         ${{ needs.test-env-vars.result }}"
+          echo "Combined:         ${{ needs.test-combined.result }}"
+          echo ""
+          echo "======================================================"
