@@ -76,6 +76,23 @@ jobs:
         if: ${{ '0xfF' == 255 }}
         run: echo "PASS_6=true" >> $GITHUB_ENV
 
+      # i32 two's complement wrapping (Int32.TryParse AllowHexSpecifier)
+      - name: hex 0x7FFFFFFF max positive i32
+        if: ${{ '0x7FFFFFFF' == 2147483647 }}
+        run: echo "PASS_7=true" >> $GITHUB_ENV
+
+      - name: hex 0x80000000 wraps to -2147483648
+        if: ${{ '0x80000000' == -2147483648 }}
+        run: echo "PASS_8=true" >> $GITHUB_ENV
+
+      - name: hex 0xFFFFFFFF wraps to -1
+        if: ${{ '0xFFFFFFFF' == -1 }}
+        run: echo "PASS_9=true" >> $GITHUB_ENV
+
+      - name: hex 0x100000000 exceeds 32-bit is NaN
+        if: ${{ '0x100000000' != 0 }}
+        run: echo "PASS_10=true" >> $GITHUB_ENV
+
       - name: Verify
         run: |
           [[ "$PASS_1" == "true" ]] || { echo "FAIL: hex lowercase"; exit 1; }
@@ -89,6 +106,11 @@ jobs:
           echo "hex 0x11: PASS"
           [[ "$PASS_6" == "true" ]] || { echo "FAIL: hex mixed case"; exit 1; }
           echo "hex mixed case: PASS"
+          echo "--- i32 overflow wrapping ---"
+          [[ "$PASS_7" == "true" ]] && echo "0x7FFFFFFF == 2147483647: PASS" || echo "0x7FFFFFFF == 2147483647: FAIL"
+          [[ "$PASS_8" == "true" ]] && echo "0x80000000 == -2147483648: PASS" || echo "0x80000000 == -2147483648: FAIL"
+          [[ "$PASS_9" == "true" ]] && echo "0xFFFFFFFF == -1: PASS" || echo "0xFFFFFFFF == -1: FAIL"
+          [[ "$PASS_10" == "true" ]] && echo "0x100000000 is NaN: PASS" || echo "0x100000000 is NaN: FAIL"
 
   # Test 3: Octal numbers
   test-octal:
@@ -118,6 +140,23 @@ jobs:
         if: ${{ '0o11' == 9 }}
         run: echo "PASS_5=true" >> $GITHUB_ENV
 
+      # i32 two's complement wrapping (Convert.ToInt32(_, 8))
+      - name: octal 0o17777777777 max positive i32
+        if: ${{ '0o17777777777' == 2147483647 }}
+        run: echo "PASS_6=true" >> $GITHUB_ENV
+
+      - name: octal 0o20000000000 wraps to -2147483648
+        if: ${{ '0o20000000000' == -2147483648 }}
+        run: echo "PASS_7=true" >> $GITHUB_ENV
+
+      - name: octal 0o37777777777 wraps to -1
+        if: ${{ '0o37777777777' == -1 }}
+        run: echo "PASS_8=true" >> $GITHUB_ENV
+
+      - name: octal 0o40000000000 exceeds 32-bit is NaN
+        if: ${{ '0o40000000000' != 0 }}
+        run: echo "PASS_9=true" >> $GITHUB_ENV
+
       - name: Verify
         run: |
           [[ "$PASS_1" == "true" ]] || { echo "FAIL: octal lowercase"; exit 1; }
@@ -129,6 +168,11 @@ jobs:
           echo "octal 0o0: PASS"
           [[ "$PASS_5" == "true" ]] || { echo "FAIL: octal 0o11"; exit 1; }
           echo "octal 0o11: PASS"
+          echo "--- i32 overflow wrapping ---"
+          [[ "$PASS_6" == "true" ]] && echo "0o17777777777 == 2147483647: PASS" || echo "0o17777777777 == 2147483647: FAIL"
+          [[ "$PASS_7" == "true" ]] && echo "0o20000000000 == -2147483648: PASS" || echo "0o20000000000 == -2147483648: FAIL"
+          [[ "$PASS_8" == "true" ]] && echo "0o37777777777 == -1: PASS" || echo "0o37777777777 == -1: FAIL"
+          [[ "$PASS_9" == "true" ]] && echo "0o40000000000 is NaN: PASS" || echo "0o40000000000 is NaN: FAIL"
 
   # Test 4: Scientific notation
   test-scientific:
@@ -684,6 +728,59 @@ jobs:
           [[ "$PASS_2" == "true" ]] || { echo "FAIL: OR"; exit 1; }
           echo "All combined tests passed"
 
+  # Test 18: "inf" abbreviation (GH runner rejects, only full "infinity" accepted)
+  test-inf-abbreviation:
+    runs-on: ubuntu-latest
+    steps:
+      - name: inf is NaN (not equal to any number)
+        if: ${{ 'inf' != 0 }}
+        run: echo "PASS_1=true" >> $GITHUB_ENV
+
+      - name: Inf is NaN
+        if: ${{ 'Inf' != 0 }}
+        run: echo "PASS_2=true" >> $GITHUB_ENV
+
+      - name: INF is NaN
+        if: ${{ 'INF' != 0 }}
+        run: echo "PASS_3=true" >> $GITHUB_ENV
+
+      - name: +inf is NaN
+        if: ${{ '+inf' != 0 }}
+        run: echo "PASS_4=true" >> $GITHUB_ENV
+
+      - name: -inf is NaN
+        if: ${{ '-inf' != 0 }}
+        run: echo "PASS_5=true" >> $GITHUB_ENV
+
+      - name: inf should NOT equal Infinity
+        if: ${{ 'inf' == 'Infinity' }}
+        run: echo "INF_EQ_INFINITY=true" >> $GITHUB_ENV
+
+      - name: full infinity still works
+        if: ${{ 'infinity' > 1000000 }}
+        run: echo "PASS_6=true" >> $GITHUB_ENV
+
+      - name: Infinity still works
+        if: ${{ 'Infinity' > 1000000 }}
+        run: echo "PASS_7=true" >> $GITHUB_ENV
+
+      - name: INFINITY still works
+        if: ${{ 'INFINITY' > 1000000 }}
+        run: echo "PASS_8=true" >> $GITHUB_ENV
+
+      - name: Verify
+        run: |
+          echo "=== inf abbreviation behavior ==="
+          [[ "$PASS_1" == "true" ]] && echo "'inf' is NaN: PASS" || echo "'inf' is NaN: FAIL (treated as Infinity?)"
+          [[ "$PASS_2" == "true" ]] && echo "'Inf' is NaN: PASS" || echo "'Inf' is NaN: FAIL"
+          [[ "$PASS_3" == "true" ]] && echo "'INF' is NaN: PASS" || echo "'INF' is NaN: FAIL"
+          [[ "$PASS_4" == "true" ]] && echo "'+inf' is NaN: PASS" || echo "'+inf' is NaN: FAIL"
+          [[ "$PASS_5" == "true" ]] && echo "'-inf' is NaN: PASS" || echo "'-inf' is NaN: FAIL"
+          [[ "$INF_EQ_INFINITY" == "true" ]] && echo "'inf' == 'Infinity': true (WRONG)" || echo "'inf' == 'Infinity': false (CORRECT - both NaN)"
+          [[ "$PASS_6" == "true" ]] && echo "'infinity' is Infinity: PASS" || echo "'infinity' is Infinity: FAIL"
+          [[ "$PASS_7" == "true" ]] && echo "'Infinity' is Infinity: PASS" || echo "'Infinity' is Infinity: FAIL"
+          [[ "$PASS_8" == "true" ]] && echo "'INFINITY' is Infinity: PASS" || echo "'INFINITY' is Infinity: FAIL"
+
   # Summary
   summary:
     runs-on: ubuntu-latest
@@ -705,6 +802,7 @@ jobs:
       - test-array-object
       - test-env-vars
       - test-combined
+      - test-inf-abbreviation
     if: always()
     steps:
       - name: Report results
@@ -728,5 +826,6 @@ jobs:
           echo "Array/Object:     ${{ needs.test-array-object.result }}"
           echo "Env vars:         ${{ needs.test-env-vars.result }}"
           echo "Combined:         ${{ needs.test-combined.result }}"
+          echo "Inf abbreviation: ${{ needs.test-inf-abbreviation.result }}"
           echo ""
           echo "======================================================"
