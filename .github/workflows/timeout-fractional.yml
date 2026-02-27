@@ -4,7 +4,7 @@ on: push
 jobs:
   test-fractional-timeout:
     runs-on: ubuntu-latest
-    timeout-minutes: 0.5
+    timeout-minutes: 1.5
     steps:
       - name: Print every 10s for 5 min
         run: |
