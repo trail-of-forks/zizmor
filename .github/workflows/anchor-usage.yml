@@ -1,0 +1,14 @@
+name: Build and Test
+
+on:
+  push:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Print build info
+        run: &print-info echo "Building ref ${{ github.ref }} triggered by ${{ github.actor }}"
+
+      - name: Print build info again
+        run: *print-info
