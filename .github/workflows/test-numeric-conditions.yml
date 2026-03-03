@@ -1,0 +1,43 @@
+# Test that GitHub Actions accepts various numeric if: conditions.
+# https://github.com/zizmorcore/zizmor/issues/1670
+name: Test numeric conditions
+
+on:
+  push:
+    branches: [dm/timeout]
+
+jobs:
+  numeric-conditions:
+    runs-on: ubuntu-latest
+    steps:
+      - name: if 0 (falsy int)
+        if: 0
+        run: echo "should be skipped"
+
+      - name: if 1 (truthy int)
+        if: 1
+        run: echo "should run"
+
+      - name: if -1 (negative int)
+        if: -1
+        run: echo "should run"
+
+      - name: if 0xf (hex int)
+        if: 0xf
+        run: echo "should run"
+
+      - name: if 1.5 (float)
+        if: 1.5
+        run: echo "should run"
+
+      - name: if 0.0 (falsy float)
+        if: 0.0
+        run: echo "should be skipped"
+
+      - name: if .inf (infinity)
+        if: .inf
+        run: echo "should run"
+
+      - name: if .nan (NaN)
+        if: .nan
+        run: echo "should be skipped"
