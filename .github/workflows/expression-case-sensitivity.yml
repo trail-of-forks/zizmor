@@ -69,3 +69,21 @@ jobs:
       - name: FAIL - endsWith should be case-insensitive
         if: ${{ !endsWith('HELLO WORLD', 'world') }}
         run: exit 1
+
+      # Greek sigma: ς (final) and σ (non-final) both uppercase to Σ.
+      # This is why we use to_uppercase() instead of to_lowercase().
+      - name: Greek final sigma equals non-final sigma
+        if: ${{ 'σ' == 'ς' }}
+        run: echo "PASS"
+
+      - name: FAIL - Greek sigmas should be equal
+        if: ${{ 'σ' != 'ς' }}
+        run: exit 1
+
+      - name: Greek capital sigma equals final sigma
+        if: ${{ 'Σ' == 'ς' }}
+        run: echo "PASS"
+
+      - name: FAIL - Greek capital and final sigma should be equal
+        if: ${{ 'Σ' != 'ς' }}
+        run: exit 1
