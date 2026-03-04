@@ -1,0 +1,66 @@
+name: Test NaN and Infinity Literals
+on:
+  push:
+
+jobs:
+  test-nan-infinity:
+    runs-on: ubuntu-latest
+    steps:
+      - name: NaN comparisons
+        run: |
+          echo "=== NaN Literal Tests ==="
+          echo "NaN == NaN:    ${{ NaN == NaN }}"
+          echo "NaN != NaN:    ${{ NaN != NaN }}"
+          echo "0 == NaN:      ${{ 0 == NaN }}"
+          echo "0 != NaN:      ${{ 0 != NaN }}"
+          echo "1 != NaN:      ${{ 1 != NaN }}"
+          echo "false == NaN:  ${{ false == NaN }}"
+          echo "false != NaN:  ${{ false != NaN }}"
+          echo "false > NaN:   ${{ false > NaN }}"
+          echo "false < NaN:   ${{ false < NaN }}"
+          echo "true > NaN:    ${{ true > NaN }}"
+          echo "NaN > false:   ${{ NaN > false }}"
+          echo "NaN < true:    ${{ NaN < true }}"
+          echo "'NaN' == NaN:  ${{ 'NaN' == NaN }}"
+          echo "'NaN' != NaN:  ${{ 'NaN' != NaN }}"
+          echo "!!NaN:         ${{ !!NaN }}"
+
+      - name: Infinity comparisons
+        run: |
+          echo "=== Infinity Literal Tests ==="
+          echo "Infinity == Infinity:    ${{ Infinity == Infinity }}"
+          echo "-Infinity == Infinity:   ${{ -Infinity == Infinity }}"
+          echo "-Infinity != Infinity:   ${{ -Infinity != Infinity }}"
+          echo "0 == Infinity:           ${{ 0 == Infinity }}"
+          echo "1 == Infinity:           ${{ 1 == Infinity }}"
+          echo "1 != Infinity:           ${{ 1 != Infinity }}"
+          echo "false < Infinity:        ${{ false < Infinity }}"
+          echo "true < Infinity:         ${{ true < Infinity }}"
+          echo "Infinity > false:        ${{ Infinity > false }}"
+          echo "Infinity > true:         ${{ Infinity > true }}"
+          echo "-Infinity < false:       ${{ -Infinity < false }}"
+          echo "-Infinity > false:       ${{ -Infinity > false }}"
+          echo "false > -Infinity:       ${{ false > -Infinity }}"
+          echo "true > -Infinity:        ${{ true > -Infinity }}"
+          echo "!!Infinity:              ${{ !!Infinity }}"
+          echo "!!-Infinity:             ${{ !!-Infinity }}"
+
+      - name: Infinity and NaN in format()
+        run: |
+          echo "=== format() with NaN/Infinity ==="
+          echo "format Infinity:  ${{ format('{0}', Infinity) }}"
+          echo "format -Infinity: ${{ format('{0}', -Infinity) }}"
+          echo "format NaN:       ${{ format('{0}', NaN) }}"
+
+      - name: String coercion with NaN/Infinity
+        run: |
+          echo "=== String coercion ==="
+          echo "' Infinity ' == Infinity:   ${{ ' Infinity ' == Infinity }}"
+          echo "' -Infinity ' == -Infinity: ${{ ' -Infinity ' == -Infinity }}"
+          echo "' NaN ' != NaN:             ${{ ' NaN ' != NaN }}"
+          echo "' NaN ' == NaN:             ${{ ' NaN ' == NaN }}"
+          echo "' abc ' != NaN:             ${{ ' abc ' != NaN }}"
+          echo "' abc ' == NaN:             ${{ ' abc ' == NaN }}"
+          echo "Infinity != ' Infinity ':   ${{ Infinity != ' Infinity ' }}"
+          echo "-Infinity != ' -Infinity ': ${{ -Infinity != ' -Infinity ' }}"
+          echo "NaN != 'NaN':               ${{ NaN != 'NaN' }}"
