@@ -1,0 +1,24 @@
+name: Test Expression Precedence
+on:
+  push:
+
+jobs:
+  test-precedence:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Test comparison with parenthesized equality (the bug)
+        run: |
+          echo "=== Operator Precedence Tests ==="
+          echo ""
+          echo "Without parens (natural precedence: <= binds tighter than ==):"
+          echo "  2 <= 3 == true  => ${{ 2 <= 3 == true }}"
+          echo ""
+          echo "With parens (explicit grouping - this is what zizmor fails to parse):"
+          echo "  2 <= (3 == true) => ${{ 2 <= (3 == true) }}"
+          echo ""
+          echo "More cases with parens around equality/comparison as RHS of comparison:"
+          echo "  3 < (2 < 1)      => ${{ 3 < (2 < 1) }}"
+          echo "  0 > (0 < 1)      => ${{ 0 > (0 < 1) }}"
+          echo "  3 <= (2 < 1)     => ${{ 3 <= (2 < 1) }}"
+          echo "  3 >= (2 == true) => ${{ 3 >= (2 == true) }}"
+          echo "  2 > (2 > 0)      => ${{ 2 > (2 > 0) }}"
